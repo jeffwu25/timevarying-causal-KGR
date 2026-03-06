@@ -1,4 +1,4 @@
-# timevarying-causal-KGR
+# Timevarying-Causal-KGR
 
 This repository contains the code and data used in the paper: 
 
