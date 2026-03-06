@@ -1,0 +1,922 @@
+---
+title: "Download-EPA"
+format: html
+editor: visual
+---
+
+## Downloading EPA data
+
+```{r}
+library(dplyr) 
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(zoo)
+library(ggplot2)
+library(urbnmapr)
+library(devtools)
+library(readxl)
+library(spdep)
+library(sp)
+library(huge)
+library(INLA)
+library(HMMpa)
+library(invgamma)
+library(brinla)
+library(reshape2)
+library(patchwork)
+library(jsonlite)
+library(maps)
+library(geosphere)
+library(urbnmapr)
+library(RAQSAPI)
+library(con2aqi)
+library(pscl)
+library(reshape2)
+library(corrplot)
+library(superheat)
+library(shapes)
+library(scales)
+library(splines)
+library(viridis)
+library(RColorBrewer)
+library(ggh4x)
+
+aqs_credentials("jeffreywu@ucsb.edu","copperheron86")
+```
+
+# Get county and pollutant reference codes from EPA
+
+```{r}
+#Get county codes 
+counties_url = "https://aqs.epa.gov/data/api/list/countiesByState?email=jeffreywu@ucsb.edu&key=copperheron86&state=06&"
+
+countycodes = fromJSON(counties_url)
+countycodes = countycodes[[2]]
+california_counties = countycodes$code
+
+#Get parameter codes
+parameters_url = "https://aqs.epa.gov/data/api/list/parametersByClass?email=jeffreywu@ucsb.edu&key=copperheron86&pc=CRITERIA"
+
+parametercodes = fromJSON(parameters_url)
+parametercodes = parametercodes[[2]]
+parametercodes = parametercodes[-7,]
+
+pollutants = data.frame(parametercodes$code)
+labels = c("lead","co","so2","no2","o3","pm10","pm25")
+pollutants = cbind(pollutants,labels)
+```
+
+# Identifying a set of monitoring stations that are well distributed across CA
+
+The goal here is to query all of the EPA measurements for all 7 pollutants and AQI from 2014-2019. The first step is to query all stations in California that collect measurements for at least one of the 7 pollutants.
+
+FUNCTION THAT QUERIES STATION LOCATIONS FOR A GIVEN POLLUTANT
+
+```{r}
+query_aqs_station_data <- function(param,year){
+  start_date <- paste0(year, "0101")
+  end_date <- paste0(year, "1231")
+  
+  url <- paste0("https://aqs.epa.gov/data/api/monitors/byState?email=jeffreywu@ucsb.edu&key=copperheron86&param=", param, "&bdate=", start_date, "&edate=", end_date, "&state=06")
+
+  myData <- fromJSON(url)
+  station_data = myData[[2]]
+  
+  return(station_data)
+}
+
+test = query_aqs_station_data(pollutants$parametercodes.code[7],2014)
+```
+
+FOR EACH POLLUTANT, GRAB ALL MONITORING STATIONS FOR EACH YEAR
+
+```{r,eval=FALSE}
+stations_url = "https://aqs.epa.gov/data/api/monitors/byState?email=jeffreywu@ucsb.edu&key=copperheron86&param=88101&bdate=20140101&edate=20141231&state=06"
+
+stations = fromJSON(stations_url)
+stations = stations[[2]]
+
+station_data2014_pm2.5 = stations %>% select(latitude,longitude,site_number, local_site_name,county_code,county_name)
+
+#Get monitoring station locations for each pollutant for each year (takes approx 3 min)
+all_pollutants_station_data <- list()
+for (year in 2014:2019){
+  year_data <- lapply(pollutants$parametercodes.code, 
+                      query_aqs_station_data, year = year)
+  all_pollutants_station_data[[as.character(year)]] <- year_data
+}
+
+
+# 1 - Lead, 2 - Carbon monoxide (CO), 3 - Sulfure dioxide (SO2), 4 - Nitrogen dioxide (NO2)
+# 5 - Ozone (O3), 6 - Total PM10, 7 - PM2.5
+
+all_pollutants_station_2014data = all_pollutants_station_data[[1]]
+all_pollutants_station_2015data = all_pollutants_station_data[[2]]
+all_pollutants_station_2016data = all_pollutants_station_data[[3]]
+all_pollutants_station_2017data = all_pollutants_station_data[[4]]
+all_pollutants_station_2018data = all_pollutants_station_data[[5]]
+all_pollutants_station_2019data = all_pollutants_station_data[[6]]
+```
+
+# Identify subset of stations that has best spatial coverage wrt CA state
+
+Starting off with a list of all the stations measuring each parameter/pollutant, we want to identify a subset of stations that measure each pollutant for each county. This overall set of stations (subset for each county combined together) should have a good spatial coverage of the state.
+
+This is difficult because there is not a station in every county measuring each pollutant. So in order to identify a good set of stations to query data from, I first looked up the two largest cities in each county, based on population.
+
+Lat/long for 2 biggest cities (based on population) in each county
+
+```{r}
+citylats = c(37.8044,37.5485,38.7743,38.8071,38.3527,38.3488,39.7285,39.7596,
+             38.1231,38.0678,39.2143,39.1546,37.9780,38.0049,41.7558,41.7548,
+             38.9399,38.6688,36.7378,36.8252,39.7474,39.5243,40.8021,40.8665,
+             32.7920,32.6789,37.3614,37.3855,35.3733,35.7688,36.3275,36.3008,
+             38.9582,38.8080,40.4163,40.2840,34.0522,33.7701,36.9613,37.1230,
+             37.9735,38.1074,37.4849,37.4320,39.4457,39.4096,37.3022,37.0583,
+             41.4871,41.4099,37.6485,38.5149,36.6777,36.6149,38.2975,38.1749,
+             39.3280,39.2191,33.8366,33.7455,38.7521,38.7907,39.9341,40.3063,
+             33.9806,33.9425,38.5816,38.4088,36.8525,36.8125,34.1083,34.0922,
+             32.7157,32.6401,37.7749,37.9780,37.9577,37.7396,35.2828,35.6369,
+             37.6879,37.5630,34.9530,34.4208,37.3387,37.3688,36.9741,36.9102,
+             40.5865,40.4482,39.6763,39.5595,41.7354,41.3099,38.1041,38.2492,
+             38.4404,38.2324,37.6393,37.4946,39.1404,39.1165,40.1785,39.9277,
+             40.7310,40.4156,36.3301,36.2077,38.0297,37.9829,34.1975,34.1706,
+             38.5449,38.6785,39.1277,39.0954)
+
+citylongs = c(122.2712,121.9886,119.8219,119.7960,120.9327,120.7741,121.8375,121.6219,
+              120.8509,120.5385,122.0094,122.1494,122.0311,121.8058,124.2026,124.1580,
+              119.9772,120.9872,119.7871,119.7029,122.1964,122.1936,124.1637,124.0828,
+              115.5631,115.4989,118.3997,118.4105,119.0187,119.2471,119.6457,119.7829,
+              122.6264,122.5583,120.6530,120.5394,118.2437,118.1937,120.0607,120.2602,
+              122.5311,122.5697,119.9663,120.0985,123.8053,123.3556,120.4830,120.8499,
+              120.5425,120.6791,118.9721,119.4768,121.6555,121.8221,122.2869,122.2608,
+              120.1833,121.0611,117.9143,117.8677,121.2880,121.2358,120.8980,121.2319,
+              117.3755,117.2297,121.4944,121.3716,121.4016,121.3658,117.2898,117.4350,
+              117.1611,117.0842,122.4194,122.0311,121.2908,121.4260,120.6596,120.6545,
+              122.4702,122.3255,120.4357,119.6982,121.8853,122.0363,122.0308,121.7569,
+              122.3917,122.2978,120.2410,120.8277,122.6345,122.3106,122.2566,122.0405,
+              122.7141,122.6367,120.9970,120.8460,121.6169,121.6380,122.2358,122.1792,
+              122.9420,123.2100,119.2966,119.3473,119.9741,120.3822,119.1771,118.8376,
+              121.7405,121.7733,121.5508,121.5522)
+citylongs = -1*citylongs
+```
+
+Alameda: Oakland (429082) and Fremont
+
+Alpine: Alpine Village (225) and Mesa Vista
+
+Amador: Ione (8363) and Jackson
+
+Butte: Chico (94776) and Paradise
+
+Calaveras: Rancho Calaveras (5324) and Angels Camp
+
+Colusa: Colusa (5911) and Williams
+
+Contra Costa: Concord (129688) and Antioch
+
+Del Norte: Crescent City (6805) and Bertsch-Oceanview
+
+El Dorado: South Lake Tahoe (22036) and Cameron Park
+
+Fresno: Fresno (530093) and Clovis
+
+Glenn: Orland (7644) and Willows
+
+Humboldt: Eureka (26998) and Arcata
+
+Imperial: El Centro (44120) and Calexico
+
+Inyo: Bishop (3746) and Dixon Lane-Meadow Creek
+
+Kern: Bakersfield (383579) and Delano
+
+Kings: Hanford (56910) and Lemoore
+
+Lake: Clearlake (15384) and Hidden Valley Lake
+
+Lassen: Susanville (15165) and Janesville
+
+Los Angeles: Los Angeles (3990000) and Long Beach
+
+Madera: Madera (65706) and Chowchilla
+
+Marin: San Rafael (58704) and Novato
+
+Mariposa: Mariposa (1526) and Catheys Valley
+
+Mendocino: Fort Bragg (7359) and Willits
+
+Merced: Merced (83316) and Los Banos
+
+Modoc: Alturas (2509) and California Pines
+
+Mono: Mammoth Lakes (8127) and Walker
+
+Monterey: Salinas (156259) and Seaside
+
+Napa: Napa (79263) and American Canyon
+
+Nevada: Truckee (16561) and Grass Valley
+
+Orange: Anaheim (352005) and Santa Ana
+
+Placer: Roseville (139117) and Rocklin
+
+Plumas: East Quincy (2489) and Chester
+
+Riverside: Riverside (330063) and Moreno Valley
+
+Sacramento: Sacramento (508529) and Elk Grove
+
+San Benito: Hollister (39749) and Ridgemark
+
+San Bernandino: San Bernandino (215941) and Fontana
+
+San Diego: San Diego (1426000) and Chula Vista
+
+San Francisco: San Francisco (810000) and Concord
+
+San Joaquin: Stockton (311178) and Tracy
+
+San Luis Obispo: San Luis Obispo (47446) and Paso Robles
+
+San Mateo: Daly City (107008) and San Mateo
+
+Santa Barbara: Santa Maria (107408) and Santa Barbara
+
+Santa Clara: San Jose (1030000) and Sunnyvale
+
+Santa Cruz: Santa Cruz (64725) and Watsonville
+
+Shasta: Redding (91772) and Anderson
+
+Sierra: Loyalton (700) and Downieville
+
+Siskiyou: Yreka (7556) and Mount Shasta
+
+Solano: Vallejo (121913) and Fairfield
+
+Sonoma: Santa Rosa (177586) and Petaluma
+
+Stanislaus: Modesto (215030) and Turlock
+
+Sutter: Yuba City and South Yuba City
+
+Tehama: Red Bluff (14283) and Corning
+
+Trinity: Weaverville (3667) and Post Mountain
+
+Tulare: Visalia (133800) and Tulare
+
+Tuolumne: Phoenix Lake-Cedar Ridge (5108) and Sonora
+
+Ventura: Oxnard (209877) and Thousand Oaks
+
+Yolo: Davis (69289) and Woodland
+
+Yuba: Linda (17773) and Olivehurst
+
+Then, I created the function below to choose a group of stations that are within a certain distance (Haversine distance from the latitude and longitude) of each city that I identified in the previous step. If there are less than 5 stations associated to a given city, the distance threshold (which starts at 100km) is increased by 50km.
+
+FUNCTION THAT SELECTS SET OF STATIONS CLOSEST TO A GIVEN LAT/LONG
+
+```{r}
+# Function to filter stations based on spatial coverage
+subset_stations_by_spatial_coverage <- function(station_data, reference_lat, reference_lon, max_distance_km=100) {
+  # Calculate distances between stations and reference location
+  distances <- distHaversine(
+    cbind(station_data$longitude, station_data$latitude),
+    c(reference_lon, reference_lat)
+  )
+  distances <- distances/1000
+  
+  # idx =  which(distances == min(distances))
+  # #Identify station within min distance to centroid of county
+  # station_data_subset <- station_data[idx, ]
+  
+  # Subset stations within the specified max_distance_km
+  idx = which(distances <= max_distance_km)
+  station_data_subset <- station_data[idx, ]
+  station_data_subset <- cbind(station_data_subset,distances[idx])
+  
+  while (nrow(station_data_subset) < 5){
+    max_distance_km = max_distance_km + 50
+    station_data_subset = subset_stations_by_spatial_coverage(station_data, 
+                              reference_lat, reference_lon, max_distance_km)
+  }
+  
+  return(station_data_subset)
+}
+
+# # Construct the subset of stations based on spatial coverage criteria (test)
+# reference_lat = citylats[3]
+# reference_lon = citylongs[3]
+# max_distance_km = 100
+# 
+# subset_stations <- subset_stations_by_spatial_coverage(station_data2014_pm2.5, reference_lat, reference_lon, max_distance_km)
+# 
+# # Print the subset of stations
+# print(subset_stations)
+```
+
+```{r,eval=FALSE}
+# Obtain centroid lat/longs for each county 
+CA.counties2 = read.csv("counties.ca.data.csv")
+ca.coordinates = data.frame(CA.counties2$county,CA.counties2$lat,CA.counties2$lng)
+colnames(ca.coordinates) = c("county","lat","long")
+
+ca.coordinates = ca.coordinates[order(ca.coordinates$county),]
+row.names(ca.coordinates) = NULL
+```
+
+IMPORTANT FUNCTION: 
+
+Given a dataset containing station locations/codes for a given pollutant and year, the function below selects 5-20 stations that are closest to the lat/longs for the two biggest cities in each county and puts the station information (code, lat, long, etc) into a dataframe.
+
+```{r,eval=FALSE}
+#Function that finds best monitoring station for each county for a specific pollutant for a specific year
+# 1 - Lead, 2 - Carbon monoxide (CO), 3 - Sulfure dioxide (SO2), 4 - Nitrogen dioxide (NO2)
+# 5 - Ozone (O3), 6 - Total PM10, 7 - PM2.5
+
+best_stations = function(stationdata,pollutant){
+
+  subset_list = list()
+  
+  #Load lat/longs for 58x2 cities into dataframe
+  CA.coords = data.frame(rep(countycodes$value_represented,each = 2),citylats,citylongs)
+  colnames(CA.coords) = c("County","Lat","Long")
+  
+  #Find closest station for each county centroid using subset_stations_by_spatial_coverage function
+  for (i in 1:nrow(CA.coords)){
+  reference_lat = CA.coords$Lat[i]
+  reference_lon = CA.coords$Long[i]
+  max_distance_km = 100
+  
+  subset_stations <- subset_stations_by_spatial_coverage(stationdata[[pollutant]], reference_lat, reference_lon, max_distance_km)
+  subset_list[[i]] = subset_stations
+  }
+  
+  #Combine pairs of city lists together 
+  subset_list2 = list()
+  sequence = seq(2,116,2)
+  for(i in sequence){
+    combine = rbind(subset_list[[i]],subset_list[[i-1]])
+    subset_list2[[i-1]] = combine
+  }
+  subset_list2 =subset_list2[!sapply(subset_list2,is.null)]
+  
+  #Create a county label vector
+  repnames = c()
+  for(i in 1:58){
+    repnames = c(repnames,nrow(subset_list2[[i]]))
+  }  
+  countylabels = rep(countycodes$value_represented,times = repnames)
+  
+  #Format the list into dataframe
+  beststations = as.data.frame(do.call(rbind, subset_list2))
+  beststations = cbind(countylabels,beststations$county_name,
+                       beststations$`distances[idx]`,beststations)
+  colnames(beststations)[c(1,2,3)] = c("measuring_county","station_county","distance_apart")
+  rownames(beststations) = NULL
+  
+  return(beststations)
+}
+
+# #test cases
+# pm2.5_stations_2014 = best_stations(all_pollutants_station_2014data,7)
+# CO_stations_2016 = best_stations(all_pollutants_station_2016data,2)
+```
+
+CREATING BEST STATION LIST/DATAFRAME FOR EACH POLLUTANT, EACH ENTRY IS A YEAR
+
+```{r,eval=FALSE}
+#Generate list for best stations for each pollutant for each year
+Lead_stations = list()
+
+Lead_stations[[1]] = best_stations(all_pollutants_station_2014data,1)
+Lead_stations[[2]] = best_stations(all_pollutants_station_2015data,1)
+Lead_stations[[3]] = best_stations(all_pollutants_station_2016data,1)
+Lead_stations[[4]] = best_stations(all_pollutants_station_2017data,1)
+Lead_stations[[5]] = best_stations(all_pollutants_station_2018data,1)
+Lead_stations[[6]] = best_stations(all_pollutants_station_2019data,1)
+
+
+
+CO_stations = list()
+
+CO_stations[[1]] = best_stations(all_pollutants_station_2014data,2)
+CO_stations[[2]] = best_stations(all_pollutants_station_2015data,2)
+CO_stations[[3]] = best_stations(all_pollutants_station_2016data,2)
+CO_stations[[4]] = best_stations(all_pollutants_station_2017data,2)
+CO_stations[[5]] = best_stations(all_pollutants_station_2018data,2)
+CO_stations[[6]] = best_stations(all_pollutants_station_2019data,2)
+
+
+
+SO2_stations = list()
+
+SO2_stations[[1]] = best_stations(all_pollutants_station_2014data,3)
+SO2_stations[[2]] = best_stations(all_pollutants_station_2015data,3)
+SO2_stations[[3]] = best_stations(all_pollutants_station_2016data,3)
+SO2_stations[[4]] = best_stations(all_pollutants_station_2017data,3)
+SO2_stations[[5]] = best_stations(all_pollutants_station_2018data,3)
+SO2_stations[[6]] = best_stations(all_pollutants_station_2019data,3)
+
+
+
+NO2_stations = list()
+
+NO2_stations[[1]] = best_stations(all_pollutants_station_2014data,4)
+NO2_stations[[2]] = best_stations(all_pollutants_station_2015data,4)
+NO2_stations[[3]] = best_stations(all_pollutants_station_2016data,4)
+NO2_stations[[4]] = best_stations(all_pollutants_station_2017data,4)
+NO2_stations[[5]] = best_stations(all_pollutants_station_2018data,4)
+NO2_stations[[6]] = best_stations(all_pollutants_station_2019data,4)
+
+
+
+O3_stations = list()
+
+O3_stations[[1]] = best_stations(all_pollutants_station_2014data,5)
+O3_stations[[2]] = best_stations(all_pollutants_station_2015data,5)
+O3_stations[[3]] = best_stations(all_pollutants_station_2016data,5)
+O3_stations[[4]] = best_stations(all_pollutants_station_2017data,5)
+O3_stations[[5]] = best_stations(all_pollutants_station_2018data,5)
+O3_stations[[6]] = best_stations(all_pollutants_station_2019data,5)
+
+
+
+PM10_stations = list()
+
+PM10_stations[[1]] = best_stations(all_pollutants_station_2014data,6)
+PM10_stations[[2]] = best_stations(all_pollutants_station_2015data,6)
+PM10_stations[[3]] = best_stations(all_pollutants_station_2016data,6)
+PM10_stations[[4]] = best_stations(all_pollutants_station_2017data,6)
+PM10_stations[[5]] = best_stations(all_pollutants_station_2018data,6)
+PM10_stations[[6]] = best_stations(all_pollutants_station_2019data,6)
+
+
+
+# Lead.PM10_stations = list()
+# 
+# Lead.PM10_stations[[1]] = best_stations(all_pollutants_station_2014data,7)
+# Lead.PM10_stations[[2]] = best_stations(all_pollutants_station_2015data,7)
+# Lead.PM10_stations[[3]] = best_stations(all_pollutants_station_2016data,7)
+# Lead.PM10_stations[[4]] = best_stations(all_pollutants_station_2017data,7)
+# Lead.PM10_stations[[5]] = best_stations(all_pollutants_station_2018data,7)
+# Lead.PM10_stations[[6]] = best_stations(all_pollutants_station_2019data,7)
+
+
+
+PM2.5_stations = list()
+
+PM2.5_stations[[1]] = best_stations(all_pollutants_station_2014data,7)
+PM2.5_stations[[2]] = best_stations(all_pollutants_station_2015data,7)
+PM2.5_stations[[3]] = best_stations(all_pollutants_station_2016data,7)
+PM2.5_stations[[4]] = best_stations(all_pollutants_station_2017data,7)
+PM2.5_stations[[5]] = best_stations(all_pollutants_station_2018data,7)
+PM2.5_stations[[6]] = best_stations(all_pollutants_station_2019data,7)
+```
+
+# Heatmap of population with station locations marked (2015)
+
+Do the stations provide a good spatial coverage of California? To me, the coverage is reasonable especially because most of the northern and eastern counties are where most of the sparsely populated counties are located. There are probably not that many EPA stations there as a result. 
+
+```{r,cache=TRUE}
+pollutants1_2015 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Raw/pollutants1_2015_8.17.RData")
+pollutants2_2015 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Raw/pollutants2_2015_8.17.RData")
+
+stationlats = c(unique(pollutants1_2015$latitude),unique(pollutants2_2015$latitude))
+stationlongs = c(unique(pollutants1_2015$longitude),unique(pollutants2_2015$longitude))
+
+station_points = data.frame(stationlats,stationlongs)
+
+#Plot
+gg_pop_stations <- ggplot() +
+  geom_polygon(data = merged_data, aes(x = long, y = lat, group = group, fill = pop), 
+               color = "black") +
+  coord_fixed(ratio = 1.3, xlim = c(-125, -112), ylim = c(30, 42)) +
+  theme_void() +
+  labs(title = "Heatmap of County Populations with Station Locations for 2015") +
+  scale_fill_gradient(low = "lightblue", high = "darkblue")
+
+# Add points
+gg_pop_stations <- gg_pop_stations +
+  geom_point(data = station_points, aes(x = stationlongs, y = stationlats), 
+             color = "red", size = 1.5)
+
+print(gg_pop_stations)
+```
+
+# Downloading and aggregating air quality data using direct API calls
+
+Given a set of 5-20 monitoring stations for each county, we loop through its station codes (for each year 2014-2019) and query using the EPA's AQS function. This function only allows you to query a maximum of 4 parameters at once for a single year, so two calls to the function have to be made for each year (4 and 3).
+
+(BELOW SHOWS IT BEING DONE FOR 2019)
+
+END GOAL FINAL FORM: ONE BIG DATAFRAME (ALL POLLUTANTS ALL YEARS TOGETHER, USE FILTER TO SEPARATE)
+
+```{r,eval=FALSE}
+# 1 - Lead, 2 - Carbon monoxide (CO), 3 - Sulfure dioxide (SO2), 4 - Nitrogen dioxide (NO2)
+# 5 - Ozone (O3), 6 - Total PM10, 7 - PM2.5
+
+stations2019x = rbind(Lead_stations[[6]],CO_stations[[6]],
+             SO2_stations[[6]],NO2_stations[[6]])
+stations2019y = rbind(O3_stations[[6]],PM10_stations[[6]],PM2.5_stations[[6]])
+
+sitenums2019x = stations2019x %>% select(county_code,site_number) %>% unique() #198 stations
+sitenums2019y = stations2019y %>% select(county_code,site_number) %>% unique() #178 stations
+
+
+#Trying EPA R Package query (took 15 + 20 min!) gives us a dataframe 
+ccodes = sitenums2019y$county_code
+snums = sitenums2019y$site_number
+str1 = "2019-01-01"
+str2 = "2019-12-31"
+
+pollutants1_2019 = aqs_dailysummary_by_site(parameter = c("14129","42101","42401","42602"),bdate = as.Date(str1),edate = as.Date(str2),stateFIPS = "06",countycode = ccodes,sitenum = snums)
+
+pollutants2_2019 = aqs_dailysummary_by_site(parameter = c("44201","81102","88101"),bdate = as.Date(str1),edate = as.Date(str2),stateFIPS = "06",countycode = ccodes,sitenum = snums)
+
+###SAVE LIST LOCALLY
+saveRDS(pollutants2_2019,file = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Raw/pollutants2_2019_8.18.RData")
+```
+
+After querying the raw data for each pollutant and each year, we want to go through it and remove any data from stations that have "bad" data. The standards that I set are that for a given year, a station should have at least 240 of the 365 days included for a year of data. Additionally, I applied a Hampel filter to identify outliers and if there are more than 14 consecutive outliers in the data i.e., days in a row with measurements that are abnormal, I considered the data from that station to not be suitable for inclusion in the final dataset.
+
+NOTE: the daily values reported in the raw dataset are actually daily averages from periodic measurements made by the station throughout the day
+
+After data from so called "bad" stations were removed, another function is applied which aggregates the daily observations into a monthly median The raw data is in the form of a single dataframe, which is fed into the important function raw_transform(). This function uses several functions to create a list of dataframes, one for each county, which represent the monthly median measurements for a certain pollutant in a given county in a given year.
+
+QUALITY CHECK FUNCTION FOR STATION DATA: WANT TO ADDRESS OUTLIERS, MISSINGNESS
+
+```{r}
+#Given a dataset like CO2016 (list of 1000ish stations), check for 2/3 missing data and for strings of outliers (14 in a row)
+
+station_quality_check = function(station_data){
+  l = length(station_data)
+  badindex = c()
+  consecutive_outliers = list()
+  
+  for (i in 1:l){
+    aqi = station_data[[i]]$aqi
+    pollutant_level = station_data[[i]]$arithmetic_mean
+    
+    #check for outliers in AQI
+    median.aqi = median(na.omit(aqi))
+    mad.aqi = mad(na.omit(aqi))
+    
+    min.aqi = median.aqi-(3*mad.aqi)
+    max.aqi = median.aqi+(3*mad.aqi)
+    
+    outliers.aqi = which(aqi < min.aqi | aqi > max.aqi)
+    
+    result.aqi = rle(diff(outliers.aqi))
+
+    
+    #check for outliers in pollutant measure
+    median.pollutant = median(na.omit(pollutant_level))
+    mad.pollutant = mad(na.omit(pollutant_level))
+    
+    min.pollutant = median.pollutant-(3*mad.pollutant)
+    max.pollutant = median.pollutant+(3*mad.pollutant)
+    
+    outliers.pollutant = which(pollutant_level < min.pollutant | pollutant_level > max.pollutant)
+    
+    result.pollutants = rle(diff(outliers.pollutant))
+    
+    
+    if (nrow(station_data[[i]]) < 240){
+      badindex = c(badindex,i)
+    }
+    
+    else if (any(result.aqi$lengths >= 14 & result.aqi$values == 1) == TRUE){
+      badindex = c(badindex,i)
+    }
+    
+    else if (any(result.pollutants$lengths >= 14 & result.pollutants$values == 1) == TRUE){
+      badindex = c(badindex,i)
+    }
+    
+    consecutive_outliers[[i]] = c("AQI",outliers.aqi,"POLLUTANTS",outliers.pollutant)
+  }
+  
+  bad_list = list(badindex,consecutive_outliers)
+  
+  return(bad_list)
+}
+
+
+#Test on CO2016 and CO2017
+# station_quality_check(CO2016) #returns 61 "bad stations" out of 1230
+# 
+# removeidx = station_quality_check(SO22017)[[1]] #returns 715 out of 1056 "bad stations" 
+# 
+# test = SO22017[- removeidx]
+```
+
+FUNCTION THAT AGGREGATES DAILY DATA INTO MONTHYLY MEDIANS
+
+```{r}
+monthly_agg = function(pollutantdata){
+  #Aggregating all the station data at once
+  date = ymd(pollutantdata$date_local)
+  df2 <- pollutantdata                                   # Duplicate data
+  df2$year_month <- floor_date(date,"month")  # Create year-month column
+  df3 = df2 %>% select(county,site_number,arithmetic_mean,aqi,year_month) %>% as.data.frame()
+  
+  df3$arithmetic_mean = as.numeric(df3$arithmetic_mean)
+  df3$aqi[which(df3$aqi == "NULL")] = NA
+  df3$aqi = as.numeric(df3$aqi)
+  
+  df.agg = df3 %>% group_by(year_month) %>% dplyr::summarize(arithmetic_mean = median(na.omit(arithmetic_mean)),aqi = median(na.omit(aqi))) %>% as.data.frame()
+  
+  return(df.agg)
+}
+
+###NEW FUNCTION (6/20/25) TO GET MONTHLY TOTALS OF PM2.5
+monthly_agg2 = function(pollutantdata){
+  #Aggregating all the station data at once
+  date = ymd(pollutantdata$date_local)
+  df2 <- pollutantdata                                   # Duplicate data
+  df2$year_month <- floor_date(date,"month")  # Create year-month column
+  df3 = df2 %>% select(county,site_number,arithmetic_mean,aqi,year_month) %>% as.data.frame()
+  
+  df3$arithmetic_mean = as.numeric(df3$arithmetic_mean)
+  df3$aqi[which(df3$aqi == "NULL")] = NA
+  df3$aqi = as.numeric(df3$aqi)
+
+  df.agg = df3 %>% group_by(year_month,site_number) %>% dplyr::summarize(monthly_total = sum(na.omit(arithmetic_mean)),aqi = median(na.omit(aqi))) %>% as.data.frame()
+  
+  df.agg2 = df.agg %>% group_by(year_month) %>% dplyr::summarize(avg_monthly_total = median(monthly_total), aqi = median(aqi))
+  
+  return(df.agg2)
+}
+```
+
+IMPORTANT FUNCTION: TRANSFORMING RAW DATA TO FINAL FORM
+
+```{r,eval = FALSE}
+# Group 1: 14129 - Lead, 421012 - Carbon monoxide (CO), 42401 - Sulfur dioxide (SO2), 42602 - Nitrogen dioxide (NO2)
+# Group 2: 44201 - Ozone (O3), 81102 - Total PM10, 88101 - PM2.5
+
+raw_transform = function(rawdata,reference_list,standard){
+  
+  ###SEPARATE DF INTO A LIST OF DFs 
+  
+  matched_list = list()
+  
+  if(missing(standard)){
+    for (i in 1:nrow(reference_list)){
+    data = rawdata %>% filter(county_code == reference_list$county_code[i], site_number == reference_list$site_number[i])
+  
+    matched_list[[i]] = data
+    }
+  } else {
+      for (i in 1:nrow(reference_list)){
+      data = rawdata %>% filter(county_code == reference_list$county_code[i], site_number == reference_list$site_number[i],pollutant_standard == standard)
+
+      matched_list[[i]] = data
+    }
+  }
+  
+  names(matched_list) = reference_list$measuring_county
+  
+  ###STATION QUALITY CHECK
+  removeidx = station_quality_check(matched_list)[[1]]
+  good_matched_list = matched_list[- removeidx]
+  
+  #Convert list back into one big dataframe
+  temp = as.data.frame(do.call(rbind, good_matched_list)) #TOO MANY ROWS RIGHT?
+  good_df = unique.data.frame(temp)
+  
+  
+  ###MAKE A LIST OF COMBINED STATION DATA FOR EACH COUNTY
+  mid_list = list()
+
+  for (i in unique(reference_list$measuring_county)){
+    
+    df_new = data.frame(good_df[1,])
+    subset = reference_list %>% filter(measuring_county == i) %>% select(county_code,site_number)
+  
+    for (j in 1:nrow(subset)){
+      pull = good_df %>% filter(county_code == reference_list$county_code[j], site_number == reference_list$site_number[j])
+      
+      df_new = rbind(df_new,pull)
+    }
+    
+    df_new = df_new[-1,]
+    mid_list[[i]] = df_new
+  }
+  
+  ###AGGREGATE DAILY DATA TO MONTHLY FOR EACH COUNTY
+  
+  final_list = lapply(mid_list,monthly_agg2)
+  
+  return(final_list)
+}
+```
+
+Assembling daily averages for one pollutant, one year from mid_list: 
+
+```{r,eval = FALSE}
+Lead_daily19 = data.frame()
+
+for (i in 1:58){
+  data = mid_list[[i]]
+  
+  county_df = data19 %>% dplyr::group_by(date_local) %>% 
+    dplyr::summarise(daily_avg = mean(arithmetic_mean,na.rm = TRUE),
+                     daily_avg_aqi = mean(aqi,na.rm = TRUE))
+  
+  county = rep(counties[i],nrow(county_df))
+  county_df = cbind(county, county_df)
+  
+  Lead_daily19 = rbind(Lead_daily19,county_df)
+}
+```
+
+
+When assembling final datasets, note that certain pollutant standards are used bc they have values for AQI... the ones I used were:
+
+Lead: Lead 3-Month 2009 ?? Has all NAs for AQI
+
+CO: CO 8-hour 1971
+
+SO2: SO2 1-hour 2010
+
+NO2: NO2 1-hour 2010
+
+O3: Ozone 8-hour 2015 ; sample duration should be 8 HR
+
+PM10: PM10 24-hour 2006
+
+PM2.5: PM25 24-hour 2012
+
+APPLY RAW TRANSFORM FUNCTION TO ALL POLLUTANTS FOR ALL YEARS (BELOW SHOWS IT BEING DONE FOR 2019)
+
+```{r,eval=FALSE}
+#Load raw data
+pollutants1_2019 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Raw/pollutants1_2019_8.18.RData")
+pollutants2_2019 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Raw/pollutants2_2019_8.18.RData")
+
+Lead2019 = pollutants1_2019 %>% filter(parameter_code == "14129")
+CO2019 = pollutants1_2019 %>% filter(parameter_code == "42101")
+SO22019 = pollutants1_2019 %>% filter(parameter_code == "42401")
+NO22019 = pollutants1_2019 %>% filter(parameter_code == "42602")
+O32019 = pollutants2_2019 %>% filter(parameter_code == "44201")
+PM102019 = pollutants2_2019 %>% filter(parameter_code == "81102")
+PM2.52019 = pollutants2_2019 %>% filter(parameter_code == "88101")
+
+Lead2019_final = raw_transform(rawdata = Lead2019,reference_list = Lead_stations[[6]],standard = "Lead 3-Month 2009")
+
+CO2019_final = raw_transform(rawdata = CO2019,reference_list = CO_stations[[6]],standard = "CO 8-hour 1971")
+
+SO22019_final = raw_transform(rawdata = SO22019,reference_list = SO2_stations[[6]],standard = "SO2 1-hour 2010")
+
+NO22019_final = raw_transform(rawdata = NO22019,reference_list = NO2_stations[[6]],standard = "NO2 1-hour 2010")
+
+O32019_final = raw_transform(rawdata = O32019,reference_list = O3_stations[[6]],standard = "Ozone 8-hour 2015")
+
+PM102019_final = raw_transform(rawdata = PM102019,reference_list = PM10_stations[[6]],standard = "PM10 24-hour 2006") 
+
+PM2.52019_final = raw_transform(rawdata = PM2.52019,reference_list = PM2.5_stations[[6]],standard = "PM25 24-hour 2012")
+```
+
+NEED TOTAL PM2.5 PER MONTH FOR PAPER 2
+
+```{r,eval = FALSE}
+pollutants2_2014 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Raw/pollutants2_2014_8.17.RData")
+PM2.52014 = pollutants2_2014 %>% filter(parameter_code == "88101")
+
+PM2.52014_final = raw_transform(rawdata = PM2.52014,reference_list = PM2.5_stations[[1]],standard = "PM25 24-hour 2012")
+
+p1 = as.data.frame(do.call(rbind, PM2.52019_final))
+p1 = cbind(p1,rep(pollutants$parametercodes.code[7],nrow(p1))) #maybe change parameter codes to 1-7?
+colnames(p1) = c("Year-Month","Value","AQI","Pollutant")
+
+p2 = as.data.frame(do.call(rbind, PM2.52018_final))
+p2 = cbind(p2,rep(pollutants$parametercodes.code[7],nrow(p2))) #maybe change parameter codes to 1-7?
+colnames(p2) = c("Year-Month","Value","AQI","Pollutant")
+
+p3 = as.data.frame(do.call(rbind, PM2.52017_final))
+p3 = cbind(p3,rep(pollutants$parametercodes.code[7],nrow(p3))) #maybe change parameter codes to 1-7?
+colnames(p3) = c("Year-Month","Value","AQI","Pollutant")
+
+p4 = as.data.frame(do.call(rbind, PM2.52016_final))
+p4 = cbind(p4,rep(pollutants$parametercodes.code[7],nrow(p4))) #maybe change parameter codes to 1-7?
+colnames(p4) = c("Year-Month","Value","AQI","Pollutant")
+
+p5 = as.data.frame(do.call(rbind, PM2.52015_final))
+p5 = cbind(p5,rep(pollutants$parametercodes.code[7],nrow(p5))) #maybe change parameter codes to 1-7?
+colnames(p5) = c("Year-Month","Value","AQI","Pollutant")
+
+p6 = as.data.frame(do.call(rbind, PM2.52014_final))
+p6 = cbind(p6,rep(pollutants$parametercodes.code[7],nrow(p6))) #maybe change parameter codes to 1-7?
+colnames(p6) = c("Year-Month","Value","AQI","Pollutant")
+
+total_pm25_1419 = rbind(p6,p5,p4,p3,p2,p1)
+c = rep(counties,each=12)
+total_pm25_1419$county = rep(c,6)
+
+saveRDS(total_pm25_1419,"total_pm25_1419_df.rds")
+```
+
+COMBINING EACH POLLUTANTS DATASET INTO A SINGLE DATAFRAME FOR THE YEAR (BELOW SHOWS IT BEING DONE FOR 2019)
+
+```{r,eval=FALSE}
+###Combine final data into one dataframe for 2014 
+test1 = as.data.frame(do.call(rbind, Lead2019_final))
+test1 = cbind(test1,rep(pollutants$parametercodes.code[1],nrow(test1))) #maybe change parameter codes to 1-7?
+colnames(test1) = c("Year-Month","Value","AQI","Pollutant")
+
+test2 = as.data.frame(do.call(rbind, CO2019_final))
+test2 = cbind(test2,rep(pollutants$parametercodes.code[2],nrow(test2))) #maybe change parameter codes to 1-7?
+colnames(test2) = c("Year-Month","Value","AQI","Pollutant")
+
+test3 = as.data.frame(do.call(rbind, SO22019_final))
+test3 = cbind(test3,rep(pollutants$parametercodes.code[3],nrow(test3))) #maybe change parameter codes to 1-7?
+colnames(test3) = c("Year-Month","Value","AQI","Pollutant")
+
+test4 = as.data.frame(do.call(rbind, NO22019_final))
+test4 = cbind(test4,rep(pollutants$parametercodes.code[4],nrow(test4))) #maybe change parameter codes to 1-7?
+colnames(test4) = c("Year-Month","Value","AQI","Pollutant")
+
+test5 = as.data.frame(do.call(rbind, O32019_final))
+test5 = cbind(test5,rep(pollutants$parametercodes.code[5],nrow(test5))) #maybe change parameter codes to 1-7?
+colnames(test5) = c("Year-Month","Value","AQI","Pollutant")
+
+test6 = as.data.frame(do.call(rbind, PM102019_final))
+test6 = cbind(test6,rep(pollutants$parametercodes.code[6],nrow(test6))) #maybe change parameter codes to 1-7?
+colnames(test6) = c("Year-Month","Value","AQI","Pollutant")
+
+test7 = as.data.frame(do.call(rbind, PM2.52019_final))
+test7 = cbind(test7,rep(pollutants$parametercodes.code[7],nrow(test7))) #maybe change parameter codes to 1-7?
+colnames(test7) = c("Year-Month","Value","AQI","Pollutant")
+
+#Combine each pollutant dataset into one big dataset for the year
+final_data19 = rbind(test1,test2,test3,test4,test5,test6,test7)
+
+###SAVE FINAL DATASET LOCALLY
+saveRDS(final_data19,file = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Aggregated/final_data19_9.1.RData")
+```
+
+HAVE TO CLEAN DATA BEFORE FINALIZING:
+
+Having combined the monthly medians for every county for a single year for each pollutant into a single dataframe, one final cleaning step must be performed before putting each years' data together. The AQI value that is in each row corresponds to the AQI standardized measurement for that specific pollutant. Each pollutant has a different standardizing equation, but once they are all standardized as they are in the dataset and they can be compared against each other. The reported AQI measurement for a given day is just the maximum of the AQI values corresponding to each of the 7 pollutants. So the maximum AQI value (among 6 values bc Lead observations never have AQI values) was found for each month and that value was set as the actual AQI value for that month in all corresponding rows.
+
+FIND MAX AQI (AMONG THE 7 POLLUTANTS) FOR EACH MONTH -\> SET AS ACTUAL AQI FOR THAT MONTH
+
+(BELOW SHOWS IT BEING DONE FOR 2019)
+
+```{r,eval=FALSE}
+#Do for each year 
+months = c("01","02","03","04","05","06","07","08","09","10","11","12")
+
+###Do for each year 
+for (i in 1:58){
+  idx1 = which(stringr::str_starts(rownames(final_data19), counties[i]))
+  subset1 = final_data19[idx1,]
+  subset1$`Year-Month`= as.Date(subset1$`Year-Month`)
+  
+  for (j in months){ 
+  #Filter by county and date
+    date = paste0("2019-",j,"-01")
+    date = as.Date(date)
+    subset2 = subset1 %>% filter(`Year-Month` == as.Date(date)) 
+    
+    trueAQI = max(na.omit(subset2$AQI))
+    
+    idx2 = which(subset1$`Year-Month` == date)
+    subset1$AQI[idx2] = trueAQI
+  }
+  
+  final_data19[idx1,] = subset1
+}
+
+###SAVE FINAL DATASET LOCALLY
+saveRDS(final_data19,file = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Aggregated/final_data19_9.1.RData")
+```
+
+COMBINING EACH YEARS DATASET INTO ONE BIG TIDY DATAFRAME FOR AIR QUALITY COVARIATES
+
+FILL IN YOUR OWN FILE DIRECTORIES HERE! START WORKING W ACTUAL EPA DATA FROM HERE ON
+
+```{r}
+final_data14 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Aggregated/final_data14_9.1.RData")
+final_data15 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Aggregated/final_data15_9.1.RData")
+final_data16 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Aggregated/final_data16_9.1.RData")
+final_data17 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Aggregated/final_data17_9.1.RData")
+final_data18 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Aggregated/final_data18_9.1.RData")
+final_data19 = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Aggregated/final_data19_9.1.RData")
+
+final_EPA_data = rbind(final_data14,final_data15,final_data16,final_data17,
+                       final_data18,final_data19)
+saveRDS(final_EPA_data,file = "C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Final/final_EPA_data_9.1.RData")
+
+
+final_EPA_data = readRDS("C:/Users/jeffr/Desktop/Spatiotemporal + Causal Inference/Wildfire Paper 2 Code/EPA data/Final/final_EPA_data_9.1.RData")
+head(final_EPA_data)
+```

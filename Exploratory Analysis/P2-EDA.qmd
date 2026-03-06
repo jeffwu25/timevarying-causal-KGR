@@ -1,0 +1,3337 @@
+---
+title: "P2-EDA-v3"
+author: "Jeffrey Wu"
+date: "`r Sys.Date()`"
+format:
+  html:
+    toc: true
+    df-print: paged
+---
+
+```{r,eval = FALSE}
+load("C:/Users/jeffr/Desktop/Paper 2/p2-eda-workspace-2.27.RData")
+```
+
+
+# Downloading relevant data
+
+```{r,warning=FALSE,echo=FALSE}
+set.seed(2)
+
+library(dplyr) 
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(zoo)
+library(ggplot2)
+library(urbnmapr)
+library(devtools)
+library(readxl)
+library(spdep)
+library(sp)
+library(huge)
+library(INLA)
+library(HMMpa)
+library(invgamma)
+library(brinla)
+library(reshape2)
+library(patchwork)
+library(jsonlite)
+library(geosphere)
+library(urbnmapr)
+library(RAQSAPI)
+library(con2aqi)
+library(pscl)
+library(reshape2)
+library(corrplot)
+library(superheat)
+library(shapes)
+library(scales)
+library(splines)
+library(viridis)
+library(RColorBrewer)
+library(ggh4x)
+```
+
+## SDI data
+
+```{r,message=FALSE,cache=TRUE,collapse=TRUE}
+###SoA data
+soa.data = read_xlsx("SoA.data.1019.xlsx")
+
+###county_flips are unique identifier for counties
+soa.data$county_fips = as.character(soa.data$county_fips) ##change it to character
+
+#IMPORTANT
+
+# This shape file contains the coordinates for county boundaries
+##counties is from urbanmap
+
+CA.counties = urbnmapr::counties %>% filter(state_abbv == "CA")
+
+###IF WE WANT TO BOIL DOWN TIME SERIES AND KEEP ALL DATA, SWITCH to CA_newdata below
+soa_joint <- left_join(CA.counties, soa.data, by = "county_fips")
+
+#Use with soa.data (full data)
+CA_data = soa_joint %>% select(long, lat, county_name.y, Year, Score, Total_Pop,
+                               EDUC_Lessthan9, EDUC_college, White_Collar,
+                               Unemployment_Rate, Adj_HH_income, Income_Disparity,
+                               Individuals_Below_Poverty, Median_Home_Value,
+                               Median_Gross_Rent, Housing_No_Telephone,
+                               Housing_Incomplete_Plumbing)
+
+### Quick descriptions of SoA data variables
+# Score: social deprivation index (SDI) score calculated from the following 11 subindices
+# EDUC_Lessthan9: % of population older than 24 with less than 9 years of education
+# EDUC_college: % of population older than 24 with at least four years of college education
+# White_Collar: % of population older than 15 employed in a white collar occupation
+# Unemployment_Rate: unemployment rate for population older than 15
+# Adj_HH_income: median household income adjusted for local housing costs
+# Income_Disparity: an income disparity ratio
+# Individuals_Below_Poverty: % of population below the federal poverty line
+# Median_Home_Value: median home value for owned, occupied units
+# Median_Gross_Rent: median gross rent for rented units
+# Housing_No_Telephone: % of households without a telephone
+# Housing_Incomplete_Plumbing: % of households with incomplete plumbing
+
+colnames(CA_data)[3] = "County"
+
+CA_newdata = soa.data[1:58,]
+CA_newdata = CA_newdata[,-c(4,7,8)]
+```
+
+## Census population data
+
+Heatmap of population by county:
+
+```{r}
+#Initializing map and station locations
+ca_map <- map_data("county", region = "california")
+
+#Match population dataset with ca_map
+#2010-2019 population data for CA 
+USpops = read.csv("CA_census_pops1019.csv")
+CApops = USpops %>% filter(STNAME == "California") %>% select(CTYNAME,POPESTIMATE2019)
+CApops = CApops[-1,]
+
+CApops$CTYNAME = unique(ca_map$subregion)
+colnames(CApops) = c("subregion","pop")
+
+merged_data <- merge(ca_map, CApops, by = "subregion", all.x = TRUE)
+
+#Plot
+gg_pop <- ggplot() +
+  geom_polygon(data = merged_data, aes(x = long, y = lat, group = group, fill = pop), 
+               color = "black") +
+  coord_fixed(ratio = 1.3, xlim = c(-125, -112), ylim = c(30, 42)) +
+  theme_void() +
+  labs(title = "Heatmap of County Populations for 2019",fill = expression("Population")) +
+  scale_fill_gradient(low = "yellow", high = "red")
+
+print(gg_pop)
+```
+
+
+```{r}
+# Create a data frame with county names and corresponding GEOIDs
+california_geoids <- data.frame(
+  County = c("Alameda", "Alpine", "Amador", "Butte", "Calaveras", "Colusa", 
+             "Contra Costa", "Del Norte", "El Dorado", "Fresno", "Glenn", 
+             "Humboldt", "Imperial", "Inyo", "Kern", "Kings", "Lake", 
+             "Lassen", "Los Angeles", "Madera", "Marin", "Mariposa", 
+             "Mendocino", "Merced", "Modoc", "Mono", "Monterey", "Napa", 
+             "Nevada", "Orange", "Placer", "Plumas", "Riverside", 
+             "Sacramento", "San Benito", "San Bernardino", "San Diego", 
+             "San Francisco", "San Joaquin", "San Luis Obispo", "San Mateo", 
+             "Santa Barbara", "Santa Clara", "Santa Cruz", "Shasta", 
+             "Sierra", "Siskiyou", "Solano", "Sonoma", "Stanislaus", 
+             "Sutter", "Tehama", "Trinity", "Tulare", "Tuolumne", 
+             "Ventura", "Yolo", "Yuba"),
+  GEOID = c("06001", "06003", "06005", "06007", "06009", "06011", 
+            "06013", "06015", "06017", "06019", "06021", "06023", 
+            "06025", "06027", "06029", "06031", "06033", "06035", 
+            "06037", "06039", "06041", "06043", "06045", "06047", 
+            "06049", "06051", "06053", "06055", "06057", "06059", 
+            "06061", "06063", "06065", "06067", "06069", "06071", 
+            "06073", "06075", "06077", "06079", "06081", "06083", 
+            "06085", "06087", "06089", "06091", "06093", "06095", 
+            "06097", "06099", "06101", "06103", "06105", "06107", 
+            "06109", "06111", "06113", "06115")
+)
+
+county_map <- map_data("county", region = "california")
+```
+
+Heatmaps for deprivation score for each year:
+
+```{r}
+for (y in 2014:2019){
+  SDI_data = soa_joint %>% filter(Year == y)
+  wildfire_data = wildfires %>% filter(year == y) %>% select(lat,long)
+
+  lat0=min(SDI_data$lat)
+  lat1=max(SDI_data$lat)
+  
+  heatmap = ggplot() + geom_polygon(data = SDI_data, aes(x = long, y = lat, group = group, fill = Score), 
+               color = "black") + geom_point(data = wildfire_data, aes(x = long, y = lat),
+                                             color = "blue", size = 3) + 
+  coord_fixed(ratio = 1.3, xlim = c(-125, -112), ylim = c(30, 42)) +
+  theme_void() +
+  labs(title = "",fill = sprintf("SDI Score %1.0f",y)) +
+  scale_fill_gradient(low = "yellow", high = "red")
+  
+  print(heatmap)
+}
+```
+
+# SKATER clustering
+
+Learn SKATER clusters on SDI data. We ended up using queen adjacency matrix not graph estimated with HUGE
+
+```{r}
+###Setting up SPDF for CA counties 
+CA_sf = st_read(getwd(),"CA_Counties_TIGER2016")
+CA_spdf = as_Spatial(CA_sf)
+
+# score_scaled = scale(CA_data$Score)
+
+c_index = unique(CA_data$County)
+y_index = unique(CA_data$Year)
+SDI_df = matrix(nrow=10,ncol=58)
+track1 = 1
+track2 = 1
+
+for (i in c_index){
+  for (j in y_index){
+    scores = CA_data %>% filter(County == i) %>% filter(Year == j) %>% select(Score) %>% unique()
+    SDI_df[track1,track2] = scores$Score
+    track1 = track1 + 1
+  }
+  track1 = 1
+  track2 = track2 + 1
+}
+
+score_scaled = scale(SDI_df) #NEED TO SCALE THE DATA BEFORE FEEDING IT INTO SKATER
+
+#covariates_scale = data.frame(apply(CA_data[,4:16],2,scale))
+covariates_scale = data.frame(t(score_scaled))
+
+CA_spdf@data = covariates_scale
+```
+
+```{r}
+#Identify neighborhood list for counties 
+CA_nb = poly2nb(CA_spdf)
+
+#summary(CA_nb)
+
+# plot(CA_spdf, main = "With queen")
+# plot(CA_nb, coords = coordinates(CA_spdf), col="blue", add = TRUE)
+
+#Calculate edge costs (dissimilarity matrix) based on Euclidean distance 
+costs <- nbcosts(CA_nb, data = covariates_scale)
+
+###Get adjacency matrix using nb2mat() (SEPARATE STEP FOR INLA)
+adj = nb2mat(CA_nb,style = "B")
+
+#Style means the coding scheme style used to create the weighting matrix 
+# B: basic binary coding scheme
+# W: row standardized coding scheme 
+# C: globally standardized coding scheme  
+# U: values of C / number of neighbors 
+# S: variance stabilizing coding scheme 
+
+#Transform edge costs to spatial weights 
+ct_w <- nb2listw(CA_nb,costs,style="B")
+
+#Create minimum spanning tree 
+ct_mst <- mstree(ct_w)
+
+plot(ct_mst,coordinates(CA_spdf),col="blue", cex.lab=0.5)
+plot(CA_spdf, add=TRUE)
+
+#Run SKATER algorithm to get 7 contiguous clusters (cluster idx is in order of CA_sf)
+clus5 <- skater(edges = ct_mst[,1:2], data = covariates_scale, ncuts = 4)
+
+#Determine an appropriate minimum population threshold based on???
+pops_summary = summary(unique(CA_data$Total_Pop))
+pops_summary
+
+#Idea 1: Use median * (how many counties should be in a cluster at minimum)
+min_pop = as.numeric(pops_summary[3] * 4)
+
+#Idea 2: If we assume CA population is 39M, divide total pop by # clusters
+min_pop2 = 39000000 / 5
+
+#Add a min population constraint
+clus5_min <- skater(edges = ct_mst[,1:2], 
+                     data = covariates_scale, 
+                     crit = 5000000, 
+                     vec.crit = CA_data$Total_Pop,
+                     ncuts = 4)
+
+#Add a minimum number of areas in each cluster constraint 
+clus5_minarea = skater(edges = ct_mst[,1:2], data = covariates_scale, ncuts = 4, 4)
+
+
+CA_data_cluster = (CA_sf %>% mutate(clus = clus5_min$groups))
+
+#Plot clustered CA
+plot((CA_sf %>% mutate(clus = clus5$groups))['clus'], main = "5 cluster example")
+
+plot((CA_sf %>% mutate(clus = clus5_min$groups))['clus'], main = "5 cluster example with population constraint")
+
+plot((CA_sf %>% mutate(clus = clus5_minarea$groups))['clus'], main = "5 cluster example with minimum number of areas constraint")
+```
+
+For reference, here are the cluster labels for each county:
+
+```{r}
+clusterlabels = data.frame(CA_data_cluster$NAME,clus5_min$groups)
+names(clusterlabels) = c("counties","Cluster")
+
+o = order(clusterlabels$counties)
+clusterlabels = clusterlabels[o,]
+rownames(clusterlabels) = NULL
+
+clusterlabels
+CA_counties = clusterlabels$counties
+num_clus = max(clus5_min$groups)
+num_counties = length(unique(CA_counties))
+```
+
+# EPA data
+
+```{r}
+final_EPA_data = readRDS("final_EPA_data_9.1.RData")
+
+head(final_EPA_data)
+
+CA_counties = california_geoids$County
+
+county_labels = rep(CA_counties,each=12)
+county_labels = rep(county_labels,7)
+county_labels = rep(county_labels,6)
+
+final_EPA_data = cbind(county_labels,final_EPA_data)
+
+final_EPA_data <- final_EPA_data %>%
+  spread(key = Pollutant, value = Value)
+
+colnames(final_EPA_data) = c("county_labels","date","AQI","lead","co",
+                             "so2","no2","o3","pm10","pm25")
+
+time = rep(1:72,58)
+final_EPA_data$time = time
+```
+
+```{r}
+#Attach total pm25 instead of median
+total_pm25 = readRDS("total_pm25_1419_df.rds")
+
+test = total_pm25 %>% arrange(by = county)
+final_EPA_data$pm25 = test$Value
+```
+
+We have included the code for downloading and aggregating the EPA data in a different script (Download-EPA.qmd) because it takes a long time to run: 
+
+## Get county and pollutant reference codes from EPA
+
+Make sure each air pollutant time series is stationary:
+
+```{r}
+#Get county codes 
+counties_url = "https://aqs.epa.gov/data/api/list/countiesByState?email=jeffreywu@ucsb.edu&key=copperheron86&state=06&"
+
+countycodes = fromJSON(counties_url)
+countycodes = countycodes[[2]]
+california_counties = countycodes$code
+
+#Get parameter codes
+parameters_url = "https://aqs.epa.gov/data/api/list/parametersByClass?email=jeffreywu@ucsb.edu&key=copperheron86&pc=CRITERIA"
+
+parametercodes = fromJSON(parameters_url)
+parametercodes = parametercodes[[2]]
+
+#Do we want to keep Lead PM10 or delete
+parametercodes = parametercodes[-7,]
+
+pollutants = data.frame(parametercodes$code)
+labels = c("lead","co","so2","no2","o3","pm10","pm25")
+pollutants = cbind(pollutants,labels)
+```
+
+```{r,eval=FALSE}
+library(astsa)
+
+for (i in CA_counties){
+  for (j in pollutants$parametercodes.code){
+    EPA_clus_ts = final_EPA_data %>% filter(Pollutant == j,county_labels == i) 
+
+    title = sprintf("Pollutant %s - %s",j,i)
+    tsplot(EPA_clus_ts$Value,main = title,xlab = "Time (months)",ylab = "Value")  
+  }
+}
+```
+
+It turns out that the time series for Lead were not stationary, so we need to detrend the data before using it
+
+```{r,eval=FALSE}
+for (i in CA_counties){
+  for (j in pollutants$parametercodes.code){
+    EPA_clus_ts = final_EPA_data %>% filter(Pollutant == j,county_labels == i) 
+    
+    lead_idx = which(final_EPA_data$Pollutant == "14129" & final_EPA_data$county_labels == i)
+    
+    if (j == "14129"){
+      detrended1 = c(0,diff(EPA_clus_ts$Value,lag=1))
+      final_EPA_agg_data[lead_idx,2] = detrended1
+      
+      title = sprintf("Pollutant %s - %s",j,i)
+      tsplot(detrended1,main = title,xlab = "Time (months)",ylab = expression(nabla~Value))
+    } else{
+      title = sprintf("Pollutant %s - %s",j,i)
+      tsplot(EPA_clus_ts$Value,main = title,xlab = "Time (months)",ylab = "Value")  
+    }
+  }
+}
+```
+
+EPA Stations plotted on a map: 
+
+```{r}
+#Initializing map and station locations
+pollutants1_2019 = readRDS("pollutants1_2019_8.18.RData")
+pollutants2_2019 = readRDS("pollutants2_2019_8.18.RData")
+
+stationlats = c(unique(pollutants1_2019$latitude),unique(pollutants2_2019$latitude))
+stationlongs = c(unique(pollutants1_2019$longitude),unique(pollutants2_2019$longitude))
+
+station_points = data.frame(stationlats,stationlongs)
+
+#Initializing map and station locations
+ca_map <- map_data("county", region = "california")
+
+#Plot
+gg_epa_stations <- ggplot() +
+  geom_polygon(data = ca_map, aes(x = long, y = lat, group = group), 
+               fill = "white",color = "black") +
+  coord_fixed(ratio = 1.3, xlim = c(-125, -112), ylim = c(30, 42)) +
+  geom_point(data = station_points, aes(x = stationlongs, y = stationlats), 
+             color = "red", size = 1.5) + 
+  theme_void() +
+  labs(title = "Active EPA Stations")
+
+print(gg_epa_stations)
+```
+
+# Mortality data
+
+```{r}
+###Cal-ViDa data
+mortality = read.csv("respmortality1419.csv") #data from 2014-2019 bc we want to avoid COVID pandemic era
+mortality = filter(mortality,Cause_of_Death %in% c("Chronic lower respiratory diseases","Influenza and pneumonia"))
+mortality = mortality[,-c(1,4,9)]
+Population = rep(100000,nrow(mortality))
+mortality = cbind(mortality,Population)
+```
+
+## Clean and aggregate mortality data
+
+### EM ALGORITHM TO IMPUTE CENSORED MORTALITY ROWS (\<10 DEATHS)
+
+```{r}
+population_age = read_xlsx("Population Categories.xlsx")
+#head(population_age)
+
+population_age = population_age[-(1:5),2]
+population_age$...2 = as.numeric(population_age$...2)
+
+#split under 5 category into < 1 and 1-4 years old 
+less1 = floor(population_age$...2[1]*0.2)
+onefour = floor(population_age$...2[1]*0.8)
+death_byage = population_age$...2[-1]
+death_byage = c(less1,onefour,death_byage)
+death_byage = death_byage[1:19]
+
+death_byage2 = death_byage[1:2]
+idx = seq(from = 3, to = 17, by = 2)
+for (i in idx){
+  death_byage2 = c(death_byage2,(death_byage[i]+death_byage[i+1]))
+}
+death_byage2 = c(death_byage2,death_byage[19])
+
+
+age_groups = unique(mortality$Age)
+death_byage2 = data.frame(cbind(age_groups,death_byage2))
+colnames(death_byage2) = c("Age_Group","Population_by_Age")
+death_byage2$Population_by_Age = as.numeric(death_byage2$Population_by_Age)
+#head(death_byage2)
+
+#2010-2019 population data for CA 
+USpops = read.csv("CA_census_pops1019.csv")
+CApops = USpops %>% filter(STNAME == "California") %>% select(CTYNAME,POPESTIMATE2019)
+counties = countycodes$value_represented #from EPA data file
+
+weights = CApops[(2:59),2]
+weights = weights/CApops[1,2]
+
+groups = unique(mortality$Age)
+step1 = 1
+step2 = 1
+
+for (i in counties){
+  for (j in groups){
+    idx = which(mortality$Age == j & mortality$County_of_Death == i)
+    mortality$Population[idx] = ceiling(death_byage2$Population[step1]*weights[step2])
+    step1 = step1+1
+  }  
+  step1 = 1
+  step2 = step2+1
+}
+
+mortality$logpop = log(mortality$Population)
+
+censored_idx = which(mortality$Total_Deaths == "<11")
+censorTF = mortality$Total_Deaths == "<11"
+mortality = cbind(mortality,censorTF)
+#head(mortality)
+```
+
+```{r}
+uncensored_mortality = mortality %>% filter(censorTF == FALSE) %>% select(Total_Deaths,Population)
+uncensored_mortality$Total_Deaths = as.numeric(uncensored_mortality$Total_Deaths)
+
+theta = mean(uncensored_mortality$Total_Deaths*100000/uncensored_mortality$Population)
+```
+
+FUNCTION FOR IMPUTING CENSORED VALUE BASED ON EXPECTATION GIVEN LAMBDA
+
+```{r}
+impute_small_values = function(lambda){
+  x = 1:10
+  p = dpois(x,lambda)
+  
+  value = sum(x*p)/sum(p)
+  return(value)
+}
+```
+
+INITIAL IMPUTATION
+
+```{r}
+mortality2 = mortality
+mortality2$Total_Deaths[censored_idx] = 0.01
+mortality2$Total_Deaths = as.numeric(mortality2$Total_Deaths)
+
+for (i in censored_idx){
+  lambda = theta*mortality2$Population[i] / 100000
+  deaths = impute_small_values(lambda)
+  
+  mortality2$Total_Deaths[i] = floor(deaths)
+}
+```
+
+INITIAL REGRESSION MODELS
+
+```{r}
+mortality2$Age = factor(mortality2$Age)
+mortality2$Cause_of_Death = factor(mortality2$Cause_of_Death)
+mortality2$Month = factor(mortality2$Month)
+
+pois_reg = glm(Total_Deaths ~ Age + Cause_of_Death + Month + offset(logpop), family = "poisson", data = mortality2)
+# ZIP_reg = zeroinfl(Total_Deaths ~ Age + Cause_of_Death + Month + offset(logpop) | 1, data = mortality2, dist = "poisson", link = "logit")
+
+vec0 = coef(pois_reg)
+# vec0 = coef(ZIP_reg)
+
+summary(pois_reg)
+# summary(ZIP_reg)
+```
+
+```{r}
+mortality3 = mortality2
+model = pois_reg
+
+model_diff = 100
+iter = 1
+vec0 = coef(model)
+
+while((model_diff > 0.01) & (iter < 10)){
+  
+  #impute data (should be between 1-10)
+  fvs = fitted.values(model)
+  
+  for (i in censored_idx){
+    deaths = impute_small_values(fvs[i])
+    mortality3$Total_Deaths[i] = floor(deaths)
+  }
+  
+  #fit model on "new" data
+  model = glm(Total_Deaths ~ Age + Cause_of_Death + Month + offset(logpop), family = "poisson", data = mortality3)
+  vec1 = coef(model)
+  
+  model_diff = max(abs(vec1 - vec0))
+  iter = iter+1
+  vec0 = vec1
+}
+
+final_pois_reg = model
+summary(final_pois_reg)
+
+logLik(final_pois_reg)
+```
+
+Reformatting the data set (mainly aggregating)
+
+```{r,collapse=TRUE}
+#Aggregating by  cause of death
+data = mortality3
+
+data1 = data %>% filter(Cause_of_Death == "Chronic lower respiratory diseases")
+data2 = data %>% filter(Cause_of_Death == "Influenza and pneumonia")
+
+newdeaths = data1$Total_Deaths + data2$Total_Deaths
+data1$Total_Deaths = newdeaths
+
+respmortality = data1[,-5]
+
+
+#Creates total deaths by adding deaths of all age groups together 
+agg.respmortality = respmortality[1,]
+agg.respmortality$Age = as.character(agg.respmortality$Age)
+rows2 = seq(1,nrow(respmortality),11)
+
+for (i in rows2){
+  agg.respmortality[i,] = respmortality[i,]
+  agg.respmortality$Total_Deaths[i] = sum(respmortality$Total_Deaths[i:(i+10)])
+  agg.respmortality$Age[i] = "Everyone"
+}
+
+agg.respmortality = na.omit(agg.respmortality)
+rownames(agg.respmortality) = NULL
+total.respmortality = agg.respmortality[,-c(6:9)]
+```
+
+Reformat dataset into time series format (rows are counties, columns are months)
+
+```{r,cache=FALSE}
+months = unique(total.respmortality$Month_of_Death)
+years = sort(unique(total.respmortality$Year_of_Death))
+counties = unique(total.respmortality$County_of_Death)
+x = 0
+
+total.mortality.ts = matrix(1,nrow = 58, ncol = 72)
+
+for (k in counties){
+  county.ts = c()
+  x = x+1
+  
+  for (i in years){
+    for (j in months){
+      deaths = total.respmortality %>% filter(County_of_Death == k) %>%  filter(Year_of_Death == i) %>% filter(Month_of_Death == j) %>% select(Total_Deaths) %>% as.numeric()
+      county.ts = c(county.ts,deaths)
+    }
+  } 
+  
+  total.mortality.ts[x,] = county.ts
+}
+
+#Label time series data 
+total.mortality.ts = as.data.frame(total.mortality.ts)
+
+dates = c()
+x=1
+for (i in years){
+  for (j in months){
+    dates[x] = sprintf("%1.0f/%1.0f",j,i)
+    x = x+1
+  }
+}
+
+colnames(total.mortality.ts) = dates
+ID = c(1:58)
+total.mortality.ts = cbind(ID,counties,total.mortality.ts)
+head(total.mortality.ts)
+```
+
+```{r}
+# Convert total.mortality.ts to a long format data frame
+library(tidyr)
+
+# Assuming total.mortality.ts is already a data frame
+total.mortality.ts_long <- total.mortality.ts %>%
+  pivot_longer(cols = -c(ID, counties), names_to = "date", values_to = "deaths")
+
+# Convert date to a proper date format
+total.mortality.ts_long$date <- as.Date(paste0("01/", total.mortality.ts_long$date), format = "%d/%m/%Y")
+
+# Create a time series plot for each county
+ggplot(total.mortality.ts_long, aes(x = date, y = deaths, color = counties)) +
+  geom_line() +
+  facet_wrap(~ counties, scales = "free_y") +
+  labs(title = "Time Series of Total Mortality by County",
+       x = "Date",
+       y = "Total Deaths") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r}
+# Ensure the date column is in Date format
+total.mortality.ts_long$date <- as.Date(total.mortality.ts_long$date, format = "%d/%m/%Y")
+
+# Extract the year from the date
+total.mortality.ts_long$Year <- format(total.mortality.ts_long$date, "%Y")
+total.mortality.ts_long$Year = as.numeric(total.mortality.ts_long$Year)
+
+# Merge total.mortality.ts_long with countypops to get the population for each county and year
+countypops = CA_data %>% filter(Year > 2013) %>% select(Total_Pop,County,Year) %>% unique()
+countypops$County = rep(california_geoids$County,each=6)
+
+total.mortality.ts_long <- total.mortality.ts_long %>%
+  left_join(countypops, by = c("counties" = "County", "Year" = "Year"))
+
+# Calculate the death rate per 100,000 people
+total.mortality.ts_long <- total.mortality.ts_long %>%
+  mutate(death_rate = (deaths / Total_Pop) * 100000)
+
+# Create a time series plot for each county
+ggplot(total.mortality.ts_long, aes(x = date, y = death_rate, color = counties)) +
+  geom_line() +
+  facet_wrap(~ counties, scales = "free_y") +
+  labs(title = "Time Series of Mortality Rate (per 100k) by County",
+       x = "Date",
+       y = "Mortality Rate (per 100k)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r}
+sb_test = total.mortality.ts_long %>% filter(counties == "Santa Barbara")
+
+# Create a time series plot for each county
+ggplot(sb_test, aes(x = date, y = death_rate, color = counties)) +
+  geom_line() +
+  facet_wrap(~ counties, scales = "free_y") +
+  labs(title = "Time Series of Mortality Rate",
+       x = "Date",
+       y = "Respiratory Related Mortality Rate (per 100k)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+acf(sb_test$death_rate)
+pacf(sb_test$death_rate)
+```
+
+Heatmap for deaths per 100,000 for Jan 2018: 
+
+```{r}
+deaths_df = total.mortality.ts_long %>% filter(date == "2018-01-01")
+deaths_df$counties = tolower(deaths_df$counties)
+
+#Plot onto a heatmap
+# Merge county map data with the dataset containing deaths
+county_map_deaths <- merge(county_map, deaths_df, by.x = "subregion", by.y = "counties")
+
+ggplot() + geom_polygon(data = county_map_deaths, aes(x = long, y = lat, group = group, fill = death_rate), 
+             color = "black") +
+coord_fixed(ratio = 1.3, xlim = c(-125, -112), ylim = c(30, 42)) +
+theme_void() +
+labs(title = "",fill = expression("Death rate (per 100,000 people) for Jan 2018")) +
+scale_fill_gradient(low = "yellow", high = "red")
+```
+
+# Visualize correlations between different counties 
+
+```{r}
+library(corrplot)
+
+#Ordered according to hclust
+cor_df = total.mortality.ts_long |> pivot_wider(id_cols = date, names_from = counties, values_from=death_rate)
+cor_df = cor_df %>% select(-date)
+
+corrplot(cor(cor_df,method = "spearman"),order = 'hclust')
+
+
+#Ordered according to SKATER clustering
+clusterlabels2 = clusterlabels[order(clusterlabels$Cluster),]
+
+cor_df2 = cor_df[,order(clusterlabels$Cluster)]
+colnames(cor_df2) = clusterlabels2$counties
+
+corrplot(cor(cor_df2,method = "spearman"))
+```
+
+## Cluster analysis of the time series correlations between counties
+
+```{r}
+county_corrs = cor(cor_df,method="spearman")
+
+corr_pairs <- melt(county_corrs)
+corr_pairs <- corr_pairs[upper.tri(county_corrs), ]  # Extract upper triangle without diagonal
+colnames(corr_pairs) <- c("County1", "County2", "Correlation")
+
+# Perform clustering to see if counties group like they do with SKATER
+
+###Hierarchical clustering 
+distance_matrix <- as.dist(1 - county_corrs)  
+
+hc <- hclust(distance_matrix, method = "average")  # You can use "ward.D", "complete", etc.
+clusters <- cutree(hc, k = 5)  
+
+# Plot the dendrogram
+plot(hc, main = "Hierarchical Clustering of Counties Based on Correlation", cex = 0.8)
+
+
+###K-Means Clustering
+set.seed(123)
+km_clusters <- kmeans(county_corrs, centers = 5, nstart = 20)
+
+#Check how well these two match -- not very well
+km_clusters$cluster
+clusterlabels
+```
+
+
+# Wildfire PM 2.5 data
+
+Filter CA counties, attach county names to measurements
+
+```{r,eval=FALSE}
+# Load smokePM predictions on smoke days
+preds = readRDS("smokePM2pt5_predictions_daily_county_20060101-20201231.rds")
+
+# Load counties
+ca_geoinfo = readRDS("ca_geodata.rds")
+
+ca_geoid_counties = ca_geoinfo %>% select(GEOID,NAME)
+
+# Load full set of dates
+dates = seq.Date(ymd("20060101"), ymd("20201231"), by = "day")
+
+# Get full combination of county-days
+# Warning: this may require a large amount of memory
+out = expand.grid(GEOID = ca_geoid_counties$GEOID, date = dates)
+
+# Match smokePM predictions on smoke days to county-days
+out = left_join(out, preds, by = c("GEOID", "date"))
+out2 = left_join(ca_geoid_counties,out,by="GEOID")
+out3 = out2 %>% filter(date > "2014-01-01" & date < "2020-01-01")
+
+# Predict 0 for remaining county-days, which are non-smoke days
+out = mutate(out3, smokePM_pred = replace_na(smokePM_pred, 0))
+
+# test = out %>% filter(date > "2015-01-01",GEOID == "06111")
+```
+
+## Aggregate daily observations to monthly level by GEOID (takes a while)
+
+```{r,eval=FALSE}
+# Ensure the date column is in Date format
+out$date <- ymd(out$date)
+
+out_subset = out %>% filter(NAME == "Santa Barbara")
+
+# Aggregate daily observations to monthly averages by GEOID
+# monthly_avg = out %>%
+#   group_by(GEOID, NAME, date = floor_date(date, "month")) %>%
+#   summarize(monthly_avg_pm25 = mean(smokePM_pred, na.rm = TRUE))
+
+# Aggregate daily observations to monthly totals by GEOID
+# monthly_total = out %>%
+#   group_by(GEOID, NAME, date = floor_date(date, "month")) %>%
+#   summarize(monthly_total_pm25 = sum(smokePM_pred, na.rm = TRUE))
+
+# Count number of "extreme" smoke days (>20) per month 
+num_extreme_days10 = out %>% 
+  group_by(GEOID, NAME, date = floor_date(date, "month")) %>%
+  summarize(num_extreme_days = length(which(smokePM_pred > 10)))
+
+num_extreme_days20 = out %>% 
+  group_by(GEOID, NAME, date = floor_date(date, "month")) %>%
+  summarize(num_extreme_days = length(which(smokePM_pred > 20)))
+
+colnames(num_extreme_days10)[4] = "num_extreme_days10"
+colnames(num_extreme_days20)[4] = "num_extreme_days20"
+
+
+saveRDS(num_extreme_days10,"num_extreme_days10.rds")
+saveRDS(num_extreme_days20,"num_extreme_days20.rds")
+
+# View the aggregated dataframe
+#View(monthly_avg)
+```
+
+```{r}
+# monthly_avg = readRDS(file="wildfirepm25_monthly_avg.rds")
+
+monthly_total = readRDS(file="wildfirepm25_monthly_total.rds")
+```
+
+### Notable wildfires from 2014-2019
+
+```{r}
+wildfires <- data.frame(
+  wildfire_name = c("King Fire", "Happy Camp Complex Fire", "July Complex Fire", 
+                    "Bald Fire", "Lodge Lightning Complex Fire","Butte Fire", 
+                    "Valley Fire", "Rocky Fire", "Jerusalem Fire", "Rough Fire",
+                    "Soberanes Fire", "Erskine Fire", "Sand Fire", "Blue Cut Fire", "Chimney Fire",
+                    "Thomas Fire", "Tubbs Fire", "Nuns Fire", "Atlas Fire", "Detwiler Fire",
+                    "Camp Fire", "Woolsey Fire", "Carr Fire", "Mendocino Complex Fire", "Ferguson Fire",
+                    "Kincade Fire", "Tick Fire", "Walker Fire", "Maria Fire", "Saddle Ridge Fire"),
+  year = c(2014, 2014, 2014, 2014, 2014,
+           2015, 2015, 2015, 2015, 2015,
+           2016, 2016, 2016, 2016, 2016,
+           2017, 2017, 2017, 2017, 2017,
+           2018, 2018, 2018, 2018, 2018,
+           2019, 2019, 2019, 2019, 2019),
+  lat = c(38.8000, 41.7900, 41.6000, 40.8000, 39.8000,
+          38.3470, 38.7980, 38.8830, 38.8830, 36.9000,
+          36.4600, 35.6100, 34.4000, 34.3000, 35.7500,
+          34.4150, 38.5766, 38.4330, 38.4040, 37.6600,
+          39.8136, 34.2350, 40.6540, 39.1773, 37.6540,
+          38.7920, 34.4730, 40.0650, 34.3350, 34.3290),
+  long = c(-120.6500, -123.3800, -123.1000, -121.5000, -123.5000,
+           -120.6800, -122.5600, -122.4760, -122.5340, -118.9000,
+           -121.9000, -118.4700, -118.5000, -117.5000, -120.9000,
+           -119.0910, -122.5911, -122.6240, -122.2320, -120.2400,
+           -121.4344, -118.7013, -122.6230, -123.2001, -119.8460,
+           -122.7800, -118.3680, -120.5780, -119.0300, -118.4760)
+)
+```
+
+# Weather data
+
+## Download and aggregate
+
+```{r,eval=FALSE}
+weather_station_data = read.csv("cimis-monthly-weather.csv",header=TRUE)
+weather_station_data$date = as.Date(paste("01", weather_station_data$Month.Year), format = "%d %b %Y")
+
+library(cimir)
+
+# Set your API key
+set_key("ec67fb7d-c8cd-4ff7-b173-832a381b6968")
+
+# Retrieve metadata for specific stations
+station_ids <- c(2, 5, 6, 7, 12, 13, 15, 35, 39, 41, 43, 44, 47, 52, 64, 68, 70, 71, 75, 77, 78, 80, 83, 84, 87, 88, 90, 91, 99, 103, 104, 105, 106, 107, 113, 114, 116, 117, 124, 125, 126, 129, 131, 135, 136, 139, 140, 143, 144, 146, 147, 150, 151, 152, 153, 157, 158, 159, 160, 163, 165, 170) 
+
+station_ids2 = c(171, 173, 174, 175, 178, 179, 181, 182, 183, 184, 187, 189, 191, 192, 193, 194, 195, 197, 199, 200, 202, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 231, 232, 233, 235, 236, 237, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 256, 257, 258, 259, 260, 261, 262, 263, 264)
+
+station_metadata <- cimis_station(station_ids)
+station_metadata2 <- cimis_station(station_ids2)
+
+station_metadata = rbind(station_metadata,station_metadata2)
+station_lats = unique(station_metadata$HmsLatitude)
+station_longs = unique(station_metadata$HmsLongitude)
+
+station_coords = data.frame(station_id = as.numeric(unique(station_metadata$StationNbr)),
+                            station_location = unique(station_metadata$Name),
+                            lat = station_lats, long = station_longs)
+
+
+weather_station_data = weather_station_data %>% left_join(station_coords,by=c("Stn.Id" = "station_id"))
+```
+
+## Plot CIMIS stations
+
+```{r}
+weather_station_data = readRDS("cimis_weather_station_data.rds")
+station_coords = readRDS("cimis_station_coords.rds")
+weather_station_data = weather_station_data[-8945,]
+
+# Function to convert DMS to Decimal Degrees
+dms_to_decimal <- function(dms) {
+  # Extract degrees, minutes, and seconds using regular expressions
+  matches <- regmatches(dms, gregexpr("(\\d+)[º°](\\d+)'(\\d+(\\.\\d+)?)", dms))[[1]]
+  if (length(matches) == 0) {
+    stop("No valid DMS format found in: ", dms)
+  }
+  
+  # Split the matched components
+  parts <- unlist(strsplit(matches, "[º°'\"NnSsEeWw]"))
+  deg <- as.numeric(parts[1])
+  min <- as.numeric(parts[2])
+  sec <- as.numeric(parts[3])
+  
+  # Calculate decimal degrees
+  decimal <- deg + min / 60 + sec / 3600
+  
+  # If direction is South or West, make it negative
+  if (grepl("[SsWw]", dms)) {
+    decimal <- -decimal
+  }
+  
+  return(decimal)
+}
+
+weather_station_data$lat = sapply(weather_station_data$lat,dms_to_decimal)
+weather_station_data$long = sapply(weather_station_data$long,dms_to_decimal)
+
+station_coords$lat = sapply(station_coords$lat,dms_to_decimal)
+station_coords$long = sapply(station_coords$long,dms_to_decimal)
+
+# Plot the map with the station coordinates
+gg_cimis_stations = ggplot() +
+  # Plot the California map
+  geom_polygon(data = ca_map, aes(x = long, y = lat, group = group), 
+               fill = "white", color = "black") +
+  coord_fixed(ratio = 1.3, xlim = c(-125, -112), ylim = c(30, 42)) +
+  # Add the stations as points
+  geom_point(data = weather_station_data, aes(x = long, y = lat), 
+             color = "red", size = 1.5) +
+  # Add labels for each station
+  # geom_text(data = weather_station_data, aes(x = long, y = lat, label = Stn.Id), 
+  #           nudge_y = 0.1, size = 3) +
+  labs(title = "CIMIS Weather Stations", 
+       x = "Longitude", y = "Latitude") +
+  theme_void()
+
+print(gg_cimis_stations)
+```
+
+```{r,eval=FALSE}
+plot_list = list(gg_epa_stations,gg_cimis_stations)
+combined = wrap_plots(plotlist = plot_list, ncol = 2)
+
+# Save one combined figure
+ggsave(
+  filename = paste0("epa_cimis_stations_map_plot.png"),
+  plot = combined,
+  path = "/home/jovyan/work/important-plots",
+  width = 8,
+  height = 6,
+  dpi = 600
+)
+```
+
+## Identify subset of stations that has best spatial coverage wrt CA state (same process as EPA data)
+
+Starting off with a list of all the stations measuring each parameter/pollutant, we want to identify a subset of stations that measure each pollutant for each county. This overall set of stations (subset for each county combined together) should have a good spatial coverage of the state.
+
+This is difficult because there is not a station in every county measuring each pollutant. So in order to identify a good set of stations to query data from, I first looked up the two largest cities in each county, based on population.
+
+Lat/long for 2 biggest cities (based on population) in each county
+
+```{r}
+citylats = c(37.8044,37.5485,38.7743,38.8071,38.3527,38.3488,39.7285,39.7596,
+             38.1231,38.0678,39.2143,39.1546,37.9780,38.0049,41.7558,41.7548,
+             38.9399,38.6688,36.7378,36.8252,39.7474,39.5243,40.8021,40.8665,
+             32.7920,32.6789,37.3614,37.3855,35.3733,35.7688,36.3275,36.3008,
+             38.9582,38.8080,40.4163,40.2840,34.0522,33.7701,36.9613,37.1230,
+             37.9735,38.1074,37.4849,37.4320,39.4457,39.4096,37.3022,37.0583,
+             41.4871,41.4099,37.6485,38.5149,36.6777,36.6149,38.2975,38.1749,
+             39.3280,39.2191,33.8366,33.7455,38.7521,38.7907,39.9341,40.3063,
+             33.9806,33.9425,38.5816,38.4088,36.8525,36.8125,34.1083,34.0922,
+             32.7157,32.6401,37.7749,37.9780,37.9577,37.7396,35.2828,35.6369,
+             37.6879,37.5630,34.9530,34.4208,37.3387,37.3688,36.9741,36.9102,
+             40.5865,40.4482,39.6763,39.5595,41.7354,41.3099,38.1041,38.2492,
+             38.4404,38.2324,37.6393,37.4946,39.1404,39.1165,40.1785,39.9277,
+             40.7310,40.4156,36.3301,36.2077,38.0297,37.9829,34.1975,34.1706,
+             38.5449,38.6785,39.1277,39.0954)
+
+citylongs = c(122.2712,121.9886,119.8219,119.7960,120.9327,120.7741,121.8375,121.6219,
+              120.8509,120.5385,122.0094,122.1494,122.0311,121.8058,124.2026,124.1580,
+              119.9772,120.9872,119.7871,119.7029,122.1964,122.1936,124.1637,124.0828,
+              115.5631,115.4989,118.3997,118.4105,119.0187,119.2471,119.6457,119.7829,
+              122.6264,122.5583,120.6530,120.5394,118.2437,118.1937,120.0607,120.2602,
+              122.5311,122.5697,119.9663,120.0985,123.8053,123.3556,120.4830,120.8499,
+              120.5425,120.6791,118.9721,119.4768,121.6555,121.8221,122.2869,122.2608,
+              120.1833,121.0611,117.9143,117.8677,121.2880,121.2358,120.8980,121.2319,
+              117.3755,117.2297,121.4944,121.3716,121.4016,121.3658,117.2898,117.4350,
+              117.1611,117.0842,122.4194,122.0311,121.2908,121.4260,120.6596,120.6545,
+              122.4702,122.3255,120.4357,119.6982,121.8853,122.0363,122.0308,121.7569,
+              122.3917,122.2978,120.2410,120.8277,122.6345,122.3106,122.2566,122.0405,
+              122.7141,122.6367,120.9970,120.8460,121.6169,121.6380,122.2358,122.1792,
+              122.9420,123.2100,119.2966,119.3473,119.9741,120.3822,119.1771,118.8376,
+              121.7405,121.7733,121.5508,121.5522)
+citylongs = -1*citylongs
+```
+
+Alameda: Oakland (429082) and Fremont
+
+Alpine: Alpine Village (225) and Mesa Vista
+
+Amador: Ione (8363) and Jackson
+
+Butte: Chico (94776) and Paradise
+
+Calaveras: Rancho Calaveras (5324) and Angels Camp
+
+Colusa: Colusa (5911) and Williams
+
+Contra Costa: Concord (129688) and Antioch
+
+Del Norte: Crescent City (6805) and Bertsch-Oceanview
+
+El Dorado: South Lake Tahoe (22036) and Cameron Park
+
+Fresno: Fresno (530093) and Clovis
+
+Glenn: Orland (7644) and Willows
+
+Humboldt: Eureka (26998) and Arcata
+
+Imperial: El Centro (44120) and Calexico
+
+Inyo: Bishop (3746) and Dixon Lane-Meadow Creek
+
+Kern: Bakersfield (383579) and Delano
+
+Kings: Hanford (56910) and Lemoore
+
+Lake: Clearlake (15384) and Hidden Valley Lake
+
+Lassen: Susanville (15165) and Janesville
+
+Los Angeles: Los Angeles (3990000) and Long Beach
+
+Madera: Madera (65706) and Chowchilla
+
+Marin: San Rafael (58704) and Novato
+
+Mariposa: Mariposa (1526) and Catheys Valley
+
+Mendocino: Fort Bragg (7359) and Willits
+
+Merced: Merced (83316) and Los Banos
+
+Modoc: Alturas (2509) and California Pines
+
+Mono: Mammoth Lakes (8127) and Walker
+
+Monterey: Salinas (156259) and Seaside
+
+Napa: Napa (79263) and American Canyon
+
+Nevada: Truckee (16561) and Grass Valley
+
+Orange: Anaheim (352005) and Santa Ana
+
+Placer: Roseville (139117) and Rocklin
+
+Plumas: East Quincy (2489) and Chester
+
+Riverside: Riverside (330063) and Moreno Valley
+
+Sacramento: Sacramento (508529) and Elk Grove
+
+San Benito: Hollister (39749) and Ridgemark
+
+San Bernandino: San Bernandino (215941) and Fontana
+
+San Diego: San Diego (1426000) and Chula Vista
+
+San Francisco: San Francisco (810000) and Concord
+
+San Joaquin: Stockton (311178) and Tracy
+
+San Luis Obispo: San Luis Obispo (47446) and Paso Robles
+
+San Mateo: Daly City (107008) and San Mateo
+
+Santa Barbara: Santa Maria (107408) and Santa Barbara
+
+Santa Clara: San Jose (1030000) and Sunnyvale
+
+Santa Cruz: Santa Cruz (64725) and Watsonville
+
+Shasta: Redding (91772) and Anderson
+
+Sierra: Loyalton (700) and Downieville
+
+Siskiyou: Yreka (7556) and Mount Shasta
+
+Solano: Vallejo (121913) and Fairfield
+
+Sonoma: Santa Rosa (177586) and Petaluma
+
+Stanislaus: Modesto (215030) and Turlock
+
+Sutter: Yuba City and South Yuba City
+
+Tehama: Red Bluff (14283) and Corning
+
+Trinity: Weaverville (3667) and Post Mountain
+
+Tulare: Visalia (133800) and Tulare
+
+Tuolumne: Phoenix Lake-Cedar Ridge (5108) and Sonora
+
+Ventura: Oxnard (209877) and Thousand Oaks
+
+Yolo: Davis (69289) and Woodland
+
+Yuba: Linda (17773) and Olivehurst
+
+Then, I created the function below to choose a group of stations that are within a certain distance (Haversine distance from the latitude and longitude) of each city that I identified in the previous step. If there are less than 5 stations associated to a given city, the distance threshold (which starts at 100km) is increased by 50km.
+
+FUNCTION THAT SELECTS SET OF STATIONS CLOSEST TO A GIVEN LAT/LONG
+
+```{r}
+# Function to filter stations based on spatial coverage
+subset_stations_by_spatial_coverage <- function(station_data, reference_lat, reference_lon, max_distance_km=100) {
+  # Calculate distances between stations and reference location
+  distances <- distHaversine(
+    cbind(station_data$long, station_data$lat),
+    c(reference_lon, reference_lat)
+  )
+  distances <- distances/1000
+  
+  # idx =  which(distances == min(distances))
+  # #Identify station within min distance to centroid of county
+  # station_data_subset <- station_data[idx, ]
+  
+  # Subset stations within the specified max_distance_km
+  idx = which(distances <= max_distance_km)
+  station_data_subset <- station_data[idx, ]
+  station_data_subset <- cbind(station_data_subset,distances[idx])
+  
+  while (nrow(station_data_subset) < 5){
+    max_distance_km = max_distance_km + 50
+    station_data_subset = subset_stations_by_spatial_coverage(station_data, 
+                              reference_lat, reference_lon, max_distance_km)
+  }
+  
+  return(station_data_subset)
+}
+
+# # Construct the subset of stations based on spatial coverage criteria (test)
+# reference_lat = citylats[3]
+# reference_lon = citylongs[3]
+# max_distance_km = 100
+# 
+# subset_stations <- subset_stations_by_spatial_coverage(station_data2014_pm2.5, reference_lat, reference_lon, max_distance_km)
+# 
+# # Print the subset of stations
+# print(subset_stations)
+```
+
+```{r,eval=FALSE}
+# Obtain centroid lat/longs for each county 
+CA.counties2 = read.csv("counties.ca.data.csv")
+ca.coordinates = data.frame(CA.counties2$county,CA.counties2$lat,CA.counties2$lng)
+colnames(ca.coordinates) = c("county","lat","long")
+
+ca.coordinates = ca.coordinates[order(ca.coordinates$county),]
+row.names(ca.coordinates) = NULL
+```
+
+IMPORTANT FUNCTION: 
+
+Given a dataset containing station locations/codes, the function below selects 5-20 stations that are closest to the lat/longs for the two biggest cities in each county and puts the station information (code, lat, long, etc) into a dataframe.
+
+```{r}
+best_stations = function(stationdata){
+
+  subset_list = list()
+  
+  #Load lat/longs for 58x2 cities into dataframe
+  CA.coords = data.frame(rep(countycodes$value_represented,each = 2),citylats,citylongs)
+  colnames(CA.coords) = c("County","Lat","Long")
+  
+  #Find closest station for each county centroid using subset_stations_by_spatial_coverage function
+  for (i in 1:nrow(CA.coords)){
+  reference_lat = CA.coords$Lat[i]
+  reference_lon = CA.coords$Long[i]
+  max_distance_km = 50
+  
+  subset_stations <- subset_stations_by_spatial_coverage(stationdata, reference_lat, reference_lon, max_distance_km)
+  subset_list[[i]] = subset_stations
+  }
+  
+  #Combine pairs of city lists together 
+  subset_list2 = list()
+  sequence = seq(2,116,2)
+  for(i in sequence){
+    combine = rbind(subset_list[[i]],subset_list[[i-1]])
+    subset_list2[[i-1]] = combine
+  }
+  subset_list2 =subset_list2[!sapply(subset_list2,is.null)]
+  
+  #Create a county label vector
+  repnames = c()
+  for(i in 1:58){
+    repnames = c(repnames,nrow(subset_list2[[i]]))
+  }  
+  countylabels = rep(countycodes$value_represented,times = repnames)
+  
+  #Format the list into dataframe
+  beststations = as.data.frame(do.call(rbind, subset_list2))
+  beststations = cbind(countylabels,
+                       beststations$`distances[idx]`,beststations)
+  colnames(beststations)[1:2] = c("measuring_county","distance_apart")
+  rownames(beststations) = NULL
+  beststations = beststations[,-7]
+  
+  return(beststations)
+}
+
+beststations = best_stations(station_coords)
+```
+
+## Label which county each station is measuring (in order)
+
+```{r}
+weather_df = data.frame()
+
+for(i in counties){
+  county_data = beststations %>% filter(measuring_county == i) 
+  idx = which(weather_station_data$Stn.Id %in% county_data$station_id)
+  new_df = weather_station_data[idx,]
+  new_df$measuring_county = i
+  weather_df = rbind(weather_df,new_df)
+}
+
+unique(weather_df$measuring_county)
+```
+
+Some counties don't have a complete time series of 72... identify them and impute? 
+
+```{r}
+missing_list = list()
+
+for (i in counties){
+  county = weather_df %>% filter(measuring_county == i)
+  missing_months = dates[!(dates %in% unique(county$date))]
+  missing_list[[i]] = missing_months
+}
+```
+
+Turns out it's just Del Norte...
+
+```{r}
+del_norte = weather_df %>% filter(measuring_county == "Del Norte")
+dates[!(dates %in% unique(del_norte$date))]
+```
+
+## Aggregate data from different stations to get a value for each county 
+
+```{r}
+dates = unique(weather_df$date)
+final_weather_df = data.frame()
+
+for (i in counties){
+  for (j in dates){
+    county_month_data = weather_df %>% filter(measuring_county == i, date == j) %>% 
+      select(Total.Precip..in.,Avg.Air.Temp..F.,Avg.Dew.Point..F.,Avg.Wind.Speed..mph.)
+    
+    county = i
+    date = j
+    total_precip = sum(county_month_data$Total.Precip..in.,na.rm = TRUE)
+    avg_air_temp = mean(county_month_data$Avg.Air.Temp..F.,na.rm = TRUE)
+    avg_dew_point = mean(county_month_data$Avg.Dew.Point..F.,na.rm = TRUE)
+    avg_wind_speed = mean(county_month_data$Avg.Wind.Speed..mph.,na.rm = TRUE)
+    
+    row = cbind(county,date,total_precip,avg_air_temp,avg_dew_point,avg_wind_speed)
+    final_weather_df = rbind(final_weather_df,row)
+  }
+}
+
+final_weather_df$date = rep(dates,58)
+final_weather_df$time = rep(c(1:72),58)
+final_weather_df$total_precip = as.numeric(final_weather_df$total_precip)
+final_weather_df$avg_air_temp = as.numeric(final_weather_df$avg_air_temp)
+final_weather_df$avg_dew_point = as.numeric(final_weather_df$avg_dew_point)
+final_weather_df$avg_wind_speed = as.numeric(final_weather_df$avg_wind_speed)
+```
+
+# Influenza like illness (ILI) prevalence data
+
+```{r}
+influenza_data <- read_csv("~/work/causal-wildfire-smoke-2-duplicate/flu-ili-byregion-fluseason.csv")
+
+inla_df <- inla_df %>%
+  mutate(
+    ili_region = case_when(
+
+      # -------------------
+      # Bay Area
+      # -------------------
+      NAME %in% c(
+        "Alameda", "Contra Costa", "Marin", "Napa", "San Francisco",
+        "San Mateo", "Santa Clara", "Solano", "Sonoma"
+      ) ~ "Bay Area",
+
+      # -------------------
+      # Central
+      # (Central Valley + Central Coast)
+      # -------------------
+      NAME %in% c(
+        # Central Valley
+        "Butte", "Colusa", "Fresno", "Glenn", "Kern", "Kings", "Madera",
+        "Merced", "Placer", "Sacramento", "San Joaquin", "Shasta",
+        "Stanislaus", "Sutter", "Tehama", "Tulare", "Yolo", "Yuba",
+        # Central Coast
+        "Monterey", "San Benito", "San Luis Obispo", "Santa Barbara",
+        "Santa Cruz", "Ventura"
+      ) ~ "Central",
+
+      # -------------------
+      # Lower Southern
+      # (LA + SD area)
+      # -------------------
+      NAME %in% c(
+        "Los Angeles", "Orange", "San Diego", "Imperial"
+      ) ~ "Lower Southern",
+
+      # -------------------
+      # Upper Southern
+      # (Inland Empire + nearby)
+      # -------------------
+      NAME %in% c(
+        "Riverside", "San Bernardino"
+      ) ~ "Upper Southern",
+
+      # -------------------
+      # Northern
+      # (All remaining northern counties)
+      # -------------------
+      TRUE ~ "Northern"
+    )
+  )
+
+
+ili_monthly_region <- influenza_data %>%
+  mutate(
+    weekending = mdy(weekending),          # if this yields NAs, switch to ymd(weekending)
+    date = floor_date(weekending, "month"),
+    region = trimws(region)
+  ) %>%
+  filter(
+    !is.na(date),
+    region != "California",
+    year(date) >= 2014, year(date) <= 2019
+  ) %>%
+  group_by(region, date) %>%
+  summarize(
+    percent_ili = mean(Percent_ILI, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Create monthly time series for California (2014–2019)
+california_monthly_ili <- influenza_data %>%
+  mutate(
+    weekending = mdy(weekending),          # ensure Date format
+    year = year(weekending),
+    month = month(weekending)
+  ) %>%
+  filter(
+    region == "California",
+    year >= 2014,
+    year <= 2019
+  ) %>%
+  group_by(year, month) %>%
+  summarize(
+    percent_ili = mean(Percent_ILI, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    date = unique(inla_df$date)
+  ) %>%
+  arrange(date)
+```
+
+```{r,eval=FALSE}
+percent_ili_ts = ts(california_monthly_ili$percent_ili,start=1,frequency=12)
+
+inla_df = inla_df %>% left_join(california_monthly_ili %>% select(date,percent_ili),by = "date")
+
+test = inla_df %>% filter(NAME == "Lake")
+
+ccf(test$monthly_total_pm25,percent_ili_ts,lag.max = 36)
+ccf(test$deaths,percent_ili_ts,lag.max = 36)
+```
+
+# Set up dataset for INLA 
+
+```{r}
+test = monthly_total %>% left_join(total.mortality.ts_long, by = c("NAME" = "counties","date"))
+test2 = test %>% left_join(final_EPA_data, by = c("NAME" = "county_labels","date"))
+inla_df = test2 %>% left_join(final_weather_df, by = c("NAME" = "county","date","time"))
+inla_df <- inla_df %>% left_join(ili_monthly_region,by = c("ili_region" = "region", "date" = "date"))
+
+inla_df$month = rep(c(1:12),348)
+inla_df$month = as.factor(inla_df$month)
+inla_df$id2 = c(1:nrow(inla_df))
+
+# Create an intercept column for each county
+for (i in 1:58) {
+  county = california_geoids$County[i]
+  inla_df[[paste0("Intercept_", i)]] <- ifelse(inla_df$NAME == county,
+                                                    1, NA)
+}
+
+#saveRDS(inla_df,"inla_df_3.7.rds")
+```
+
+```{r}
+#Attach cluster labels and SDI scores 
+inla_df = inla_df %>% left_join(clusterlabels,by = c("NAME" = "counties"))
+
+# Assign column names to your yearly df
+colnames(SDI_df) <- CA_counties
+rownames(SDI_df) <- 2010:2019
+
+# Convert wide to long: one row per year-county pair
+df_long <- as.data.frame(SDI_df) %>%
+  mutate(year = as.integer(rownames(.))) %>%
+  pivot_longer(-year, names_to = "county", values_to = "value")
+
+# Add all 12 months to each row
+df_monthly_expanded <- df_long %>%
+  crossing(month = 1:12) %>%
+  arrange(county, year, month) %>% 
+  filter(year >= 2014)
+
+inla_df$SDI = df_monthly_expanded$value
+inla_df$Cluster = factor(inla_df$Cluster)
+
+inla_df$nonsmoke_pm25 = inla_df$pm25 - inla_df$monthly_total_pm25
+inla_df$nonsmoke_pm25[inla_df$nonsmoke_pm25 < 0] = 0
+```
+
+## Create county groups based on SDI
+
+SKATER clusters by SDI:
+
+```{r}
+clusterlabels$Cluster = factor(clusterlabels$Cluster)
+clusterlabels$subregion = tolower(clusterlabels$counties)
+
+merged_data <- merge(ca_map, clusterlabels, by = "subregion", all.x = TRUE)
+
+# Define distinct colors for each category
+#distinct_colors = qualitative_hcl(7,palette = "dynamic")
+distinct_colors <- c("red", "blue", "green", "purple", "yellow")
+# distinct_colors <- c("red", "blue")
+
+#Plot
+gg_with_grouping <- ggplot() +
+  geom_polygon(data = merged_data, aes(x = long, y = lat, group = group, fill = Cluster), 
+               color = "black") +
+  coord_fixed(ratio = 1.3, xlim = c(-125, -112), ylim = c(30, 42)) +
+  theme_void() +
+  scale_color_viridis(discrete=TRUE) +
+  theme(
+      title = element_text(size = 16),
+      legend.text  = element_text(size = 20),  # legend labels
+      legend.title = element_text(size = 20)   # legend title
+    )
+
+gg_with_grouping
+```
+
+Simplify clusters to quintiles of SDI score instead of SKATER
+
+```{r}
+# Calculate quintile breakpoints
+SDI_groups = quantile(inla_df$SDI, c(0.2, 0.4, 0.6, 0.8))
+
+# Calculate average SDI per county
+avg_SDI = apply(SDI_df, 2, mean)
+avg_SDI_df = data.frame(counties, avg_SDI)
+
+# Assign group labels based on quintiles
+grouplabels = rep(NA, nrow(avg_SDI_df))  # Initialize vector
+
+grouplabels[avg_SDI <= SDI_groups[1]] = 1
+grouplabels[avg_SDI > SDI_groups[1] & avg_SDI <= SDI_groups[2]] = 2
+grouplabels[avg_SDI > SDI_groups[2] & avg_SDI <= SDI_groups[3]] = 3
+grouplabels[avg_SDI > SDI_groups[3] & avg_SDI <= SDI_groups[4]] = 4
+grouplabels[avg_SDI > SDI_groups[4]] = 5
+
+# Add to dataframe
+avg_SDI_df$Group = grouplabels
+group_labels = avg_SDI_df[,c(1,3)]
+
+inla_df = inla_df %>% left_join(group_labels,by = c("NAME" = "counties"))
+inla_df$Group = factor(inla_df$Group)
+```
+
+```{r}
+#Attach group labels to each county
+group_labels$Group = factor(group_labels$Group)
+group_labels$subregion = tolower(group_labels$counties)
+
+merged_data <- merge(ca_map, group_labels, by = "subregion", all.x = TRUE)
+
+# Define distinct colors for each category
+#distinct_colors = qualitative_hcl(7,palette = "dynamic")
+distinct_colors <- c("red", "blue", "green", "purple", "yellow")
+# distinct_colors <- c("red", "blue")
+
+#Plot
+gg_with_grouping <- ggplot() +
+  geom_polygon(data = merged_data, aes(x = long, y = lat, group = group, fill = Group), 
+               color = "black") +
+  coord_fixed(ratio = 1.3, xlim = c(-125, -112), ylim = c(30, 42)) +
+  theme_void() +
+  scale_color_viridis(discrete=TRUE) +
+  theme(
+      title = element_text(size = 16),
+      legend.text  = element_text(size = 20),  # legend labels
+      legend.title = element_text(size = 20)   # legend title
+    )
+
+gg_with_grouping
+```
+
+# Exploratory Data Analysis 
+
+## Time series plots of treatment, response, and confounders
+
+Preview some time series plots for some random counties
+
+```{r}
+plot_counties = c('Fresno','Modoc','Humboldt','San Diego','Alameda')
+idx = which(california_geoids$County %in% plot_counties)
+
+# idx = sample(1:nrow(california_geoids),10)
+plot_counties = california_geoids[idx,]
+
+county_colors <- c(
+  "Fresno"    = "#F57B63",  # red / coral
+  "Modoc"     = "#A6A431",  # yellow-green
+  "Humboldt"  = "#00996F",  # green-teal
+  "San Diego" = "#2BA5B1",  # blue-teal
+  "Alameda"   = "#C67ACD"   # purple
+)
+```
+
+```{r}
+for(i in plot_counties$GEOID){
+  data = monthly_total %>% filter(GEOID == i)
+
+  # Create the time series plot
+  treatment.tsplot = ggplot(data, aes(x = date, y = monthly_total_pm25, 
+  color = NAME)) +
+    geom_line() +
+    labs(title = "Time Series of smokePM_pred",
+        x = "Date",
+        y = "smokePM_pred",
+        color = "County") +
+    theme_minimal()
+
+  print(treatment.tsplot)
+}
+
+# #Santa Barbara
+# data = monthly_total %>% filter(GEOID == "06083")
+# 
+# # Create the time series plot
+# treatment.tsplot = ggplot(data, aes(x = date, y = monthly_total_pm25, 
+# color = NAME)) +
+#   geom_line() +
+#   labs(title = "Time Series of smokePM_pred",
+#       x = "Date",
+#       y = "smokePM_pred",
+#       color = "County") +
+#   theme_minimal()
+# 
+# print(treatment.tsplot)
+```
+
+Some spikes here and there but usually 0, so probably not normally distributed. Not stationary either 
+
+```{r}
+combined_data = monthly_total %>% filter(NAME %in% plot_counties$County) 
+
+combined_data$NAME <- factor(combined_data$NAME,levels = plot_counties$County)
+
+exposure_label = expression(paste("Monthly Wildfire Specific PM2.5 ("*mu*"g/m"^3*")"))
+
+# Create the time series plot
+p = ggplot(combined_data, aes(x = date, y = monthly_total_pm25, color = NAME)) +
+  geom_line() + facet_wrap2(~NAME,scales = "free_y",axes="all") +
+  labs(title = "Time Series of Wildfire Specific PM2.5",
+       x = "Date",
+       y = exposure_label,
+       color = "County") +
+  theme_minimal() 
+
+p
+
+# ggsave(
+#   filename = "exposure-county-ts.png",
+#   plot = p,
+#   path = "~/work/important-plots",
+#   width = 8,
+#   height = 10,
+#   dpi = 600
+# )
+```
+
+The spikes tend to match up between different counties 
+
+Weather variables: 
+
+```{r}
+#Precipitation
+for(i in plot_counties$County){
+  data = final_weather_df %>% filter(county == i)
+
+  # Create the time series plot
+  precip.tsplot = ggplot(data, aes(x = date, y = total_precip, 
+  color = county)) +
+    geom_line() +
+    labs(title = "Time Series of Total Precipitation",
+        x = "Date",
+        y = "Total Precipitation (in)",
+        color = "County") +
+    theme_minimal()
+
+  print(precip.tsplot)
+}
+```
+
+Different ranges of values for different counties, all follow similar seasonal patterns. Relatively stationary 
+
+```{r}
+combined_data = final_weather_df %>% filter(county %in% plot_counties$County) 
+combined_data$county <- factor(combined_data$county,levels = plot_counties$County)
+
+# Create the time series plot
+p = ggplot(combined_data, aes(x = date, y = total_precip, color = county)) +
+  geom_line() + facet_wrap2(~county,scales = "free_y",axes="all") + 
+  labs(title = "Time Series of Total Precipitation",
+       x = "Date",
+       y = "Monthly Total Precipitation (in)",
+       color = "County") + 
+  theme_minimal()
+
+p
+
+# ggsave(
+#   filename = "precip-county-ts.png",
+#   plot = p,
+#   path = "~/work/important-plots",
+#   width = 8,
+#   height = 10,
+#   dpi = 600
+# )
+```
+
+```{r}
+#Temperature
+for(i in plot_counties$County){
+  data = final_weather_df %>% filter(county == i)
+
+  # Create the time series plot
+  temp.tsplot = ggplot(data, aes(x = date, y = avg_air_temp, 
+  color = county)) +
+    geom_line() +
+    labs(title = "Time Series of Avg Temperature",
+        x = "Date",
+        y = "Avg Air Temperature (F)",
+        color = "County") +
+    theme_minimal()
+
+  print(temp.tsplot)
+}
+```
+
+Very stationary and seasonal, no surprise 
+
+```{r}
+combined_data = final_weather_df %>% filter(county %in% plot_counties$County) 
+combined_data$county <- factor(combined_data$county,levels = plot_counties$County)
+
+# Create the time series plot
+p = ggplot(combined_data, aes(x = date, y = avg_air_temp, color = county)) +
+  geom_line() + facet_wrap2(~county,scales = "free_y",axes="all") + 
+  labs(title = "Time Series of Avg Temperature",
+       x = "Date",
+       y = "Monthly Average Air Temperature (F)",
+       color = "County") +
+  theme_minimal()
+
+p
+
+# ggsave(
+#   filename = "temp-county-ts.png",
+#   plot = p,
+#   path = "~/work/important-plots",
+#   width = 8,
+#   height = 10,
+#   dpi = 600
+# )
+```
+
+```{r}
+#Humidity
+for(i in plot_counties$County){
+  data = final_weather_df %>% filter(county == i)
+
+  # Create the time series plot
+  humidity.tsplot = ggplot(data, aes(x = date, y = avg_dew_point, 
+  color = county)) +
+    geom_line() +
+    labs(title = "Time Series of Avg Humidity",
+        x = "Date",
+        y = "Avg Dew Point (F)",
+        color = "County") +
+    theme_minimal()
+
+  print(humidity.tsplot)
+}
+```
+
+Very similar scales across counties. Same seasonal pattern as well. Higher dew point = more humid 
+
+```{r}
+combined_data = final_weather_df %>% filter(county %in% plot_counties$County) 
+combined_data$county <- factor(combined_data$county,levels = plot_counties$County)
+
+# Create the time series plot
+p = ggplot(combined_data, aes(x = date, y = avg_dew_point, color = county)) +
+  geom_line() + facet_wrap2(~county,scales = "free_y",axes="all") + 
+  labs(title = "Time Series of Avg Humidity",
+       x = "Date",
+       y = "Monthly Average Dew Point (F)",
+       color = "County") +
+  theme_minimal()
+
+p
+
+# ggsave(
+#   filename = "humidity-county-ts.png",
+#   plot = p,
+#   path = "~/work/important-plots",
+#   width = 8,
+#   height = 10,
+#   dpi = 600
+# )
+```
+
+Big dip in Glenn in 2015, very unusual observation? Del Norte seems to be a little colder than the other counties
+
+```{r}
+#Wind
+for(i in plot_counties$County){
+  data = final_weather_df %>% filter(county == i)
+
+  # Create the time series plot
+  wind.tsplot = ggplot(data, aes(x = date, y = avg_wind_speed, 
+  color = county)) +
+    geom_line() +
+    labs(title = "Time Series of Avg Wind",
+        x = "Date",
+        y = "Avg Wind Speed (mph)",
+        color = "County") +
+    theme_minimal()
+
+  print(wind.tsplot)
+}
+```
+
+All average wind speeds pretty much less than 10. Dip in fall and winter and then spike winter into spring 
+
+```{r}
+combined_data = final_weather_df %>% filter(county %in% plot_counties$County) 
+combined_data$county <- factor(combined_data$county,levels = plot_counties$County)
+
+# Create the time series plot
+p = ggplot(combined_data, aes(x = date, y = avg_wind_speed, color = county)) +
+  geom_line() + facet_wrap2(~county,scales = "free_y",axes="all") +
+  labs(title = "Time Series of Avg Wind Speed",
+       x = "Date",
+       y = "Monthly Average Wind Speed (mph)",
+       color = "County") +
+  theme_minimal()
+
+p
+
+# ggsave(
+#   filename = "wind-county-ts.png",
+#   plot = p,
+#   path = "~/work/important-plots",
+#   width = 8,
+#   height = 10,
+#   dpi = 600
+# )
+```
+
+Similar patterns between counties but more messy than the other weather variables 
+
+ILI prevalence: 
+
+```{r}
+ggplot(california_monthly_ili,
+       aes(x = date, y = percent_ili)) +
+  geom_line() +
+  labs(
+    x = "Date (2014-2019)",
+    y = "Average Percent ILI",
+    title = "California Monthly ILI Prevalence"
+  ) +
+  theme_bw()
+```
+
+```{r}
+ggplot(inla_df,
+       aes(x = date, y = percent_ili,color = ili_region)) +
+  geom_line() + facet_wrap(~ili_region) + 
+  labs(
+    x = "Date (2014-2019)",
+    y = "Average Percent ILI",
+    title = "California Monthly ILI Prevalence"
+  ) +
+  theme_bw()
+```
+
+Shows some years have higher ILI prevalence than others - might confound our outcome model
+
+```{r}
+plot_data <- inla_df %>%
+  filter(NAME %in% plot_counties$County) %>%
+  mutate(NAME = factor(NAME, levels = plot_counties$County))
+
+p = ggplot(plot_data, aes(x = date, y = percent_ili, color = NAME, group = NAME)) +
+  geom_line() +
+  facet_wrap2(~NAME,scales = "free_y",axes="all") +
+  #scale_color_manual(values = county_colors, drop = FALSE) +
+  labs(
+    title = "Time Series of ILI Prevalence",
+    x = "Date",
+    y = "Monthly ILI prevalence (%)",
+    color = "County") +
+  theme_minimal() 
+
+p
+
+# ggsave(
+#   filename = "iliprev-county-ts.png",
+#   plot = p,
+#   path = "~/work/important-plots",
+#   width = 8,
+#   height = 10,
+#   dpi = 600
+# )
+```
+Lead: 
+
+```{r}
+lead_label = expression(paste("Monthly Median Lead Levels ("*mu*"g/m"^3*")"))
+
+p = ggplot(plot_data, aes(x = date, y = lead, color = NAME, group = NAME)) +
+  geom_line() +
+  facet_wrap2(~NAME,scales = "free_y",axes="all") +
+  #scale_color_manual(values = county_colors, drop = FALSE) +
+  labs(
+    title = "Time Series of Lead",
+    x = "Date",
+    y = lead_label,
+    color = "County") +
+  theme_minimal() 
+
+p
+
+# ggsave(
+#   filename = "lead-county-ts.png",
+#   plot = p,
+#   path = "~/work/important-plots",
+#   width = 8,
+#   height = 10,
+#   dpi = 600
+# )
+```
+
+CO: 
+
+```{r}
+p = ggplot(plot_data, aes(x = date, y = co, color = NAME, group = NAME)) +
+  geom_line() +
+  facet_wrap2(~NAME,scales = "free_y",axes="all") +
+  #scale_color_manual(values = county_colors, drop = FALSE) +
+  labs(
+    title = "Time Series of CO",
+    x = "Date",
+    y = "Monthly Median CO Levels (ppm)",
+    color = "County") +
+  theme_minimal() 
+
+p
+
+# ggsave(
+#   filename = "co-county-ts.png",
+#   plot = p,
+#   path = "~/work/important-plots",
+#   width = 8,
+#   height = 10,
+#   dpi = 600
+# )
+```
+SO2: 
+
+```{r}
+p = ggplot(plot_data, aes(x = date, y = so2, color = NAME, group = NAME)) +
+  geom_line() +
+  facet_wrap2(~NAME,scales = "free_y",axes="all") +
+  #scale_color_manual(values = county_colors, drop = FALSE) +
+  labs(
+    title = "Time Series of SO2",
+    x = "Date",
+    y = "Monthly Median SO2 Levels (ppb)",
+    color = "County") +
+  theme_minimal() 
+
+p
+
+# ggsave(
+#   filename = "so2-county-ts.png",
+#   plot = p,
+#   path = "~/work/important-plots",
+#   width = 8,
+#   height = 10,
+#   dpi = 600
+# )
+```
+NO2: 
+
+```{r}
+p = ggplot(plot_data, aes(x = date, y = no2, color = NAME, group = NAME)) +
+  geom_line() +
+  facet_wrap2(~NAME,scales = "free_y",axes="all") +
+  #scale_color_manual(values = county_colors, drop = FALSE) +
+  labs(
+    title = "Time Series of NO2",
+    x = "Date",
+    y = "Monthly Median NO2 Levels (ppb)",
+    color = "County") +
+  theme_minimal() 
+
+p
+
+# ggsave(
+#   filename = "no2-county-ts.png",
+#   plot = p,
+#   path = "~/work/important-plots",
+#   width = 8,
+#   height = 10,
+#   dpi = 600
+# )
+```
+
+O3: 
+
+```{r}
+p = ggplot(plot_data, aes(x = date, y = o3, color = NAME, group = NAME)) +
+  geom_line() +
+  facet_wrap2(~NAME,scales = "free_y",axes="all") +
+  #scale_color_manual(values = county_colors, drop = FALSE) +
+  labs(
+    title = "Time Series of O3",
+    x = "Date",
+    y = "Monthly Median O3 Levels (ppm)",
+    color = "County") +
+  theme_minimal() 
+
+p
+
+# ggsave(
+#   filename = "o3-county-ts.png",
+#   plot = p,
+#   path = "~/work/important-plots",
+#   width = 8,
+#   height = 10,
+#   dpi = 600
+# )
+```
+
+PM10: 
+
+```{r}
+pm10_label = expression(paste("Monthly Median Ambient PM10 ("*mu*"g/m"^3*")"))
+
+p = ggplot(plot_data, aes(x = date, y = pm10, color = NAME, group = NAME)) +
+  geom_line() +
+  facet_wrap2(~NAME,scales = "free_y",axes="all") +
+  #scale_color_manual(values = county_colors, drop = FALSE) +
+  labs(
+    title = "Time Series of PM10",
+    x = "Date",
+    y = pm10_label,
+    color = "County") +
+  theme_minimal() 
+
+p
+
+# ggsave(
+#   filename = "pm10-county-ts.png",
+#   plot = p,
+#   path = "~/work/important-plots",
+#   width = 8,
+#   height = 10,
+#   dpi = 600
+# )
+```
+
+PM2.5: 
+
+```{r}
+pm25_label = expression(paste("Monthly Total Ambient PM2.5 ("*mu*"g/m"^3*")"))
+
+p = ggplot(plot_data, aes(x = date, y = pm25, color = NAME, group = NAME)) +
+  geom_line() +
+  facet_wrap2(~NAME,scales = "free_y",axes="all") +
+  #scale_color_manual(values = county_colors, drop = FALSE) +
+  labs(
+    title = "Time Series of PM2.5",
+    x = "Date",
+    y = pm25_label,
+    color = "County") +
+  theme_minimal() 
+
+p
+
+ggsave(
+  filename = "pm25-county-ts.png",
+  plot = p,
+  path = "~/work/important-plots",
+  width = 8,
+  height = 10,
+  dpi = 600
+)
+```
+
+Deaths: 
+
+```{r}
+p = ggplot(plot_data, aes(x = date, y = deaths, color = NAME, group = NAME)) +
+  geom_line() +
+  facet_wrap2(~NAME,scales = "free_y",axes="all") +
+  #scale_color_manual(values = county_colors, drop = FALSE) +
+  labs(
+    title = "Time Series of Respiratory Related Deaths",
+    x = "Date",
+    y = "Monthly Respiratory Related Deaths",
+    color = "County") +
+  theme_minimal() 
+
+p
+
+# ggsave(
+#   filename = "deaths-county-ts.png",
+#   plot = p,
+#   path = "~/work/important-plots",
+#   width = 8,
+#   height = 10,
+#   dpi = 600
+# )
+```
+
+## ACF/PACF plots for important variables: 
+
+ACF measures the correlation between a time series and its lagged values (direct and indirect effects)
+
+PACF measures the direct correlation between a time series and its lagged values after removing the effects of intermediate lags SO PACF is prob more useful in our case
+
+### Check for stationarity
+
+```{r}
+county_df = inla_df %>% filter(NAME == "Santa Barbara")
+
+#Mortality
+plot.ts(county_df$death_rate)
+transformed_outcome_ts = log(county_df$death_rate+0.01)
+plot.ts(transformed_outcome_ts)
+
+#Exposure (needs transformation)
+plot.ts(county_df$monthly_total_pm25)
+
+transformed_treatment_ts = log(county_df$monthly_total_pm25+0.01)
+plot.ts(transformed_treatment_ts)
+
+#Air pollutants
+plot.ts(county_df$co)
+plot.ts(county_df$no2)
+plot.ts(county_df$so2)
+plot.ts(county_df$o3)
+
+#ILI prevalence (needs transformation)
+plot.ts(county_df$percent_ili)
+plot.ts(sqrt(county_df$percent_ili))
+
+#Weather
+plot.ts(county_df$total_precip)
+plot.ts(county_df$avg_air_temp)
+plot.ts(county_df$avg_dew_point)
+plot.ts(county_df$avg_wind_speed)
+```
+
+Need to analyze one county at a time -> use SB as a case study (will try San Diego, Shasta, Alameda too)
+
+```{r}
+acf(transformed_outcome_ts,main = "ACFs for Respiratory Related Mortality")
+pacf(transformed_outcome_ts,main = "PACFs for Respiratory Related Mortality")
+```
+
+Death: 
+
+- ACF significant lags are 1,4,5,6,7,8,11,12,13,17,18
+- PACF significant lags is 6,18,12
+
+SO ARROWS BETWEEN Y's IS VALID 
+
+```{r}
+# acf(county_df$monthly_total_pm25)
+# pacf(county_df$monthly_total_pm25)
+
+acf(transformed_treatment_ts,main = "ACFs for Wildfire Specific PM2.5")
+pacf(transformed_treatment_ts,main = "PACFs for Wildfire Specific PM2.5")
+```
+
+Wildfire PM2.5
+
+- ACF: 1,6,7,11,12,13 
+- PACF: 1,6,11
+
+SO ARROWS BETWEEN A's IS VALID 
+
+```{r}
+acf(county_df$AQI,main = "ACFs for AQI")
+pacf(county_df$AQI,main = "PACFs for AQI")
+```
+
+AQI
+
+- ACF significant lags are 6,12
+- PACF significant lags is 6 (12 almost significant)
+
+```{r}
+# acf(county_df$percent_ili,main = "ACFs for ILI Prevalence")
+# pacf(county_df$percent_ili,main = "PACFs for ILI Prevalence")
+
+acf(sqrt(county_df$percent_ili),main = "ACFs for ILI Prevalence")
+pacf(sqrt(county_df$percent_ili),main = "PACFs for ILI Prevalence")
+```
+
+ILI prevalence
+
+- ACF: 1,2,5,6,7,8,11,12,13,14,17,18
+- PACF significant lags is 1,2,3,4
+
+```{r}
+acf(county_df$total_precip,main = "ACFs for Precipitation")
+pacf(county_df$total_precip,main = "PACFs for Precipitation")
+```
+
+Precipitation
+
+- ACF significant lags are 1,5,6,7 (10,12,18 are almost significant)
+- PACF significant lags is 1
+
+```{r}
+acf(county_df$avg_air_temp,main = "ACFs for Temperature")
+pacf(county_df$avg_air_temp,main = "PACFs for Temperature")
+```
+
+Temperature
+
+- ACF significant lags are 1,2,4,5,6,7,8,10,11,12,13,14,16,17,18
+- PACF significant lags is 1,2,3,4,6
+
+```{r}
+acf(county_df$avg_dew_point,main = "ACFs for Humidity")
+pacf(county_df$avg_dew_point,main = "PACFs for Humidity")
+```
+
+Humidity
+
+- ACF significant lags are 1,2,4,5,6,7,8,10,11,12,13,16,17,18
+- PACF significant lags is 1,3,4
+
+```{r}
+acf(county_df$avg_wind_speed,main = "ACFs for Wind")
+pacf(county_df$avg_wind_speed,main = "PACFs for Wind")
+```
+
+Wind
+
+- ACF significant lags are 1,2,5,6,7,11,12,13
+- PACF: 1,3,10
+
+SEEMS LIKE CONFOUNDER VALUES DEPENDENT ON PREVIOUS VALUES
+
+
+## Correlation plots (Spearman's, Cross Correlation, Granger causality):
+
+Granger causality: is one time series useful in forecasting another time series (temporally related)
+
+```{r}
+#mortality rate + wildfire pm25
+# ccf(county_df$death_rate,county_df$monthly_total_pm25,lag.max = 36)
+# 
+# cor(county_df$death_rate,county_df$monthly_total_pm25,method = "spearman")
+# 
+# lmtest::grangertest(county_df$death_rate~county_df$monthly_total_pm25,order = 12)
+
+###with transformed treatment ts
+ccf(transformed_outcome_ts,transformed_treatment_ts,lag.max = 36,main = "CCFs for Respiratory Related Mortality Rate & Exposure")
+
+cor(transformed_outcome_ts,transformed_treatment_ts,method = "spearman")
+
+lmtest::grangertest(transformed_outcome_ts~transformed_treatment_ts,order = 12)
+```
+
+Mortality rate + treatment
+
+- CCF: clusters of significant negative and positive lags alternating, exhibiting seasonal patterns
+- Spearman's: -0.407
+- Granger causality hypothesis test: not significant
+
+```{r}
+#wildfire pm25 + AQI
+# ccf(county_df$monthly_total_pm25,county_df$AQI,lag.max = 36)
+# 
+# cor(county_df$monthly_total_pm25,county_df$AQI,method = "spearman")
+# 
+# lmtest::grangertest(county_df$AQI~county_df$monthly_total_pm25,order = 12)
+
+###with transformed treatment ts
+ccf(transformed_treatment_ts,county_df$AQI,lag.max = 36,main = "CCFs for Exposure & AQI")
+
+cor(transformed_treatment_ts,county_df$AQI,method = "spearman")
+
+lmtest::grangertest(county_df$AQI~transformed_treatment_ts,order = 12)
+```
+
+Exposure + AQI
+- CCF: significant lags at -28,-17,-16,-10,-4,7,8,20,32
+
+Interpretation: peak at -4 means that past values of treatment are correlated with AQI levels now, peak at 7 means that future values of treatment are correlated with past values of AQI
+
+- Spearman's: 0.142
+- Granger causality hypothesis test: Not significant
+
+```{r}
+#wildfire pm25 + CO
+# ccf(county_df$monthly_total_pm25,county_df$co,lag.max = 36)
+# 
+# cor(county_df$monthly_total_pm25,county_df$co,method = "spearman")
+# 
+# lmtest::grangertest(county_df$co~county_df$monthly_total_pm25,order = 12)
+
+###with transformed treatment ts
+ccf(transformed_treatment_ts,county_df$co,lag.max = 36,main = "CCFs for Exposure & CO")
+
+cor(transformed_treatment_ts,county_df$co,method = "spearman")
+
+lmtest::grangertest(county_df$co~transformed_treatment_ts,order = 12)
+
+
+#wildfire pm25 + NO2
+# ccf(county_df$monthly_total_pm25,county_df$no2,lag.max = 36)
+# 
+# cor(county_df$monthly_total_pm25,county_df$no2,method = "spearman")
+# 
+# lmtest::grangertest(county_df$no2~county_df$monthly_total_pm25,order = 12)
+
+###with transformed treatment ts
+ccf(transformed_treatment_ts,county_df$no2,lag.max = 36,main = "CCFs for Exposure & NO2")
+
+cor(transformed_treatment_ts,county_df$no2,method = "spearman")
+
+lmtest::grangertest(county_df$no2~transformed_treatment_ts,order = 12)
+
+
+#wildfire pm25 + SO2
+# ccf(county_df$monthly_total_pm25,county_df$so2,lag.max = 36)
+# 
+# cor(county_df$monthly_total_pm25,county_df$so2,method = "spearman")
+# 
+# lmtest::grangertest(county_df$so2~county_df$monthly_total_pm25,order = 12)
+
+###with transformed treatment ts
+ccf(transformed_treatment_ts,county_df$so2,lag.max = 36,main = "CCFs for Exposure & SO2")
+
+cor(transformed_treatment_ts,county_df$so2,method = "spearman")
+
+lmtest::grangertest(county_df$so2~transformed_treatment_ts,order = 12)
+
+
+#wildfire pm25 + O3
+# ccf(county_df$monthly_total_pm25,county_df$o3,lag.max = 36)
+# 
+# cor(county_df$monthly_total_pm25,county_df$o3,method = "spearman")
+# 
+# lmtest::grangertest(county_df$o3~county_df$monthly_total_pm25,order = 12)
+
+###with transformed treatment ts
+ccf(transformed_treatment_ts,county_df$o3,lag.max = 36,main = "CCFs for Exposure & O3")
+
+cor(transformed_treatment_ts,county_df$o3,method = "spearman")
+
+lmtest::grangertest(county_df$o3~transformed_treatment_ts,order = 12)
+```
+
+Exposure + air pollutants: 
+
+- CCF: clusters of significant negative and positive lags alternating, exhibiting seasonal patterns
+- Spearman's: all weak correlation levels
+- Granger causality hypothesis test: none significant 
+
+```{r}
+#wildfire pm25 + ILI prevalence
+
+###with transformed treatment ts
+ccf(transformed_treatment_ts,sqrt(county_df$percent_ili),lag.max = 36,main = "CCFs for Exposure & ILI Prevalence")
+
+cor(transformed_treatment_ts,sqrt(county_df$percent_ili),method = "spearman")
+
+lmtest::grangertest(sqrt(county_df$percent_ili)~transformed_treatment_ts,order = 12)
+```
+
+Exposure + ILI prevalence: 
+
+- CCF: clusters of significant negative and positive lags alternating, exhibiting seasonal patterns
+- Spearman's: -0.354
+- Granger causality hypothesis test: not significant 
+
+```{r}
+#mortality rate + AQI
+ccf(transformed_outcome_ts,county_df$AQI,lag.max = 36,main = "CCFs for Respiratory Related Mortality Rate & AQI")
+
+cor(transformed_outcome_ts,county_df$AQI,method = "spearman")
+
+lmtest::grangertest(transformed_outcome_ts~county_df$AQI,order = 12)
+```
+
+Mortality rate + AQI
+
+- CCF: clusters of significant negative and positive lags alternating, exhibiting seasonal patterns
+- Spearman's: 0.231
+- Granger causality hypothesis test: Not significant
+
+```{r}
+#wildfire pm25 + precipitation
+ccf(transformed_treatment_ts,county_df$total_precip,lag.max = 36,main = "CCFs for Exposure & Precipitation")
+
+cor(transformed_treatment_ts,county_df$total_precip,method = "spearman")
+
+lmtest::grangertest(transformed_treatment_ts~county_df$total_precip,order = 12)
+```
+
+Exposure + Precipitation
+
+- CCF: clusters of significant negative and positive lags alternating, exhibiting seasonal patterns
+- Spearman's: -0.387
+- Granger causality hypothesis test: not significant
+
+```{r}
+#wildfire pm25 + temp
+ccf(transformed_treatment_ts,county_df$avg_air_temp,lag.max = 36,main = "CCFs for Exposure & Temperature")
+
+cor(transformed_treatment_ts,county_df$avg_air_temp,method = "spearman")
+
+lmtest::grangertest(transformed_treatment_ts~county_df$avg_air_temp,order = 12)
+```
+
+Exposure + Temperature
+
+- CCF: clusters of significant negative and positive lags alternating, exhibiting seasonal patterns
+- Spearman's: 0.413
+- Granger causality hypothesis test: Not significant
+
+```{r}
+#wildfire pm25 + humidity
+ccf(transformed_treatment_ts,county_df$avg_dew_point,lag.max = 36,main = "CCFs for Exposure & Humidity")
+
+cor(transformed_treatment_ts,county_df$avg_dew_point,method = "spearman")
+
+lmtest::grangertest(transformed_treatment_ts~county_df$avg_dew_point,order = 12)
+```
+
+Exposure + Humidity
+
+- CCF: clusters of significant negative and positive lags alternating, exhibiting seasonal patterns 
+- Spearman's: 0.243
+- Granger causality hypothesis test: Not significant
+
+```{r}
+#wildfire pm25 + wind
+ccf(transformed_treatment_ts,county_df$avg_wind_speed,lag.max = 36,main = "CCFs for Exposure & Wind")
+
+cor(transformed_treatment_ts,county_df$avg_wind_speed,method = "spearman")
+
+lmtest::grangertest(transformed_treatment_ts~county_df$avg_wind_speed,order = 12)
+```
+
+Exposure + Wind 
+
+- CCF: clusters of significant negative and positive lags alternating, exhibiting seasonal patterns
+- Spearman's: -0.292
+- Granger causality hypothesis test: Not significant 
+
+```{r}
+#temperature + wind
+ccf(county_df$avg_air_temp,county_df$avg_wind_speed,lag.max = 36,main = "CCFs for Temperature & Wind")
+
+cor(county_df$avg_air_temp,county_df$avg_wind_speed,method = "spearman")
+
+lmtest::grangertest(county_df$avg_air_temp~county_df$avg_wind_speed,order = 12)
+```
+
+Temperature + Wind
+
+- CCF: clusters of significant negative and positive lags alternating, exhibiting seasonal patterns
+- Spearman's: -0.076
+- Granger causality hypothesis test: Not significant
+
+```{r}
+#humidity + wind
+ccf(county_df$avg_dew_point,county_df$avg_wind_speed,lag.max = 36,main = "CCFs for Humidity & Wind")
+
+cor(county_df$avg_dew_point,county_df$avg_wind_speed,method = "spearman")
+
+lmtest::grangertest(county_df$avg_dew_point~county_df$avg_wind_speed,order = 12)
+```
+
+Humidity + Wind
+
+- CCF: clusters of significant negative and positive lags alternating, exhibiting seasonal patterns
+- Spearman's: -0.065
+- Granger causality hypothesis test: not significant
+
+```{r}
+#precipitation + humidity
+ccf(county_df$total_precip,county_df$avg_dew_point,lag.max = 36,main = "CCFs for Precipitation & Humidity")
+
+cor(county_df$total_precip,county_df$avg_dew_point,method = "spearman")
+
+lmtest::grangertest(county_df$total_precip~county_df$avg_dew_point,order = 12)
+```
+
+Precipitation + Humidity: 
+
+- CCF: clusters of significant negative and positive lags alternating, exhibiting seasonal patterns
+- Spearman's: -0.493
+- Granger causality hypothesis test: Not significant
+
+```{r}
+#mortality rate + temperature
+ccf(transformed_outcome_ts,county_df$avg_air_temp,lag.max = 36,main = "CCFs for Respiratory Related Mortality Rate & Temperature")
+
+cor(transformed_outcome_ts,county_df$avg_air_temp,method = "spearman")
+
+lmtest::grangertest(transformed_outcome_ts~county_df$avg_air_temp,order = 12)
+```
+
+Mortality rate + Temperature
+
+- CCF: clusters of significant negative and positive lags alternating, exhibiting seasonal patterns
+- Spearman's: -0.751
+- Granger causality hypothesis test: Not significant
+
+```{r}
+#mortality rate + humidity
+ccf(transformed_outcome_ts,county_df$avg_dew_point,lag.max = 36,main = "CCFs for Respiratory Related Mortality Rate & Humidity")
+
+cor(transformed_outcome_ts,county_df$avg_dew_point,method = "spearman")
+
+lmtest::grangertest(transformed_outcome_ts~county_df$avg_dew_point,order = 12)
+```
+
+Mortality rate + Humidity
+
+- CCF: clusters of significant negative and positive lags alternating, exhibiting seasonal patterns
+- Spearman's: -0.663
+- Granger causality hypothesis test: not significant
+
+
+Mortality rate + other weather confounders had similar patterns 
+
+
+```{r,eval=FALSE}
+ccfvalues = ccf(transformed_outcome_ts,county_df$AQI,lag.max = 36,main = "CCFs for Respiratory Related Mortality Rate & AQI")
+ccfvalues
+```
+
+Not very strong correlations overall, moderate at best. BUT they are significant. I also ran the analysis above for San Bernandino, Alameda, and Alpine. Seems like we can say that past values of confounders affects current value of treatment and then that value also affects future values of confounders e.g. precipitation and wind. I think it is safe to say that there should be arrows between most confounders and then also between confounders and response.
+
+
+## Grouped time series plot for important variables:
+
+```{r}
+colors <- c("pm25" = "blue", "monthly_total_pm25" = "red")
+
+ggplot(county_df, aes(x= date)) + 
+  geom_line(aes(y = monthly_total_pm25, color = "monthly_total_pm25")) +
+  geom_line(aes(y = pm25, color = "pm25")) + 
+  labs(x = "Year",
+       y = "Value",
+       color = "Legend",title = "Santa Barbara") +
+  scale_color_manual(values = colors) + theme_minimal()
+```
+
+```{r}
+colors <- c("monthly_total_pm25" = "blue", "death_rate" = "red", "AQI" = "green")
+
+ggplot(county_df, aes(x= date)) + 
+  geom_line(aes(y = monthly_total_pm25, color = "monthly_total_pm25")) +
+  geom_line(aes(y = death_rate, color = "death_rate")) + 
+  geom_line(aes(y = AQI, color = "AQI")) + 
+  labs(x = "Year",
+       y = "Value",
+       color = "Legend",title = "Santa Barbara") +
+  scale_color_manual(values = colors) + theme_minimal()
+```
+
+
+Mortality rate + wildfire pm25
+
+```{r}
+colors <- c("monthly_total_pm25" = "blue", "death_rate" = "red")
+
+ggplot(county_df, aes(x= date)) + 
+  geom_line(aes(y = monthly_total_pm25, color = "monthly_total_pm25")) +
+  geom_line(aes(y = death_rate, color = "death_rate")) + 
+  labs(x = "Year",
+       y = "Value",
+       color = "Legend",title = "Santa Barbara") +
+  scale_color_manual(values = colors) + theme_minimal()
+```
+
+
+wildfire pm25 + aqi
+
+```{r}
+colors <- c("monthly_total_pm25" = "blue", "AQI" = "green")
+
+ggplot(county_df, aes(x= date)) + 
+  geom_line(aes(y = monthly_total_pm25, color = "monthly_total_pm25")) +
+  geom_line(aes(y = AQI, color = "AQI")) + 
+  labs(x = "Year",
+       y = "Value",
+       color = "Legend",title = "Santa Barbara") +
+  scale_color_manual(values = colors) + theme_minimal()
+```
+Exposure + air pollutants
+
+```{r}
+colors <- c("monthly_total_pm25" = "red", "co" = "blue", "no2" = "green", "so2" = "pink", "o3" = "purple")
+
+y_label = expression(paste("Ambient Air Concentration ("*mu*"g/m"^3*")"))
+
+ggplot(county_df, aes(x= date)) + 
+  geom_line(aes(y = monthly_total_pm25, color = "monthly_total_pm25")) +
+  # geom_line(aes(y = co, color = "co")) + 
+  geom_line(aes(y = no2, color = "no2")) + 
+  # geom_line(aes(y = so2, color = "so2")) + 
+  # geom_line(aes(y = o3, color = "o3")) + 
+  labs(x = "Year",
+       y = y_label,
+       color = "Legend",title = "Santa Barbara") +
+  scale_color_manual(values = colors) + theme_minimal()
+```
+
+```{r}
+ggplot(county_df, aes(x= date)) + 
+  # geom_line(aes(y = monthly_total_pm25, color = "monthly_total_pm25")) +
+  geom_line(aes(y = co, color = "co")) + 
+  # geom_line(aes(y = no2, color = "no2")) + 
+  geom_line(aes(y = so2, color = "so2")) + 
+  geom_line(aes(y = o3, color = "o3")) + 
+  labs(x = "Year",
+       y = y_label,
+       color = "Legend",title = "Santa Barbara") +
+  scale_color_manual(values = colors) + theme_minimal()
+```
+
+Exposure + ILI prevalence
+
+```{r}
+colors <- c("monthly_total_pm25" = "red", "percent_ili" = "blue")
+
+ggplot(county_df, aes(x= date)) + 
+  geom_line(aes(y = monthly_total_pm25, color = "monthly_total_pm25")) +
+  geom_line(aes(y = percent_ili, color = "percent_ili")) + 
+  labs(x = "Year",
+       y = "Value",
+       color = "Legend",title = "Santa Barbara") +
+  scale_color_manual(values = colors) + theme_minimal()
+```
+
+Mortality rate + ILI prevalence
+
+```{r}
+colors <- c("death_rate" = "red", "percent_ili" = "blue")
+
+ggplot(county_df, aes(x= date)) + 
+  geom_line(aes(y = death_rate, color = "death_rate")) +
+  geom_line(aes(y = percent_ili, color = "percent_ili")) + 
+  labs(x = "Year",
+       y = "Value",
+       color = "Legend",title = "Santa Barbara") +
+  scale_color_manual(values = colors) + theme_minimal()
+```
+
+Mortality rate + aqi
+
+```{r}
+colors <- c("death_rate" = "red", "AQI" = "green")
+
+ggplot(county_df, aes(x= date)) + 
+  geom_line(aes(y = death_rate, color = "death_rate")) + 
+  geom_line(aes(y = AQI, color = "AQI")) + 
+  labs(x = "Year",
+       y = "Value",
+       color = "Legend",title = "Santa Barbara") +
+  scale_color_manual(values = colors) + theme_minimal()
+```
+
+
+Wildfire pm25 + weather confounders
+
+```{r}
+colors <- c("monthly_total_pm25" = "black", "total_precip" = "blue", "avg_air_temp" = "red",
+            "avg_dew_point" = "darkgreen", "avg_wind_speed" = "purple")
+
+ggplot(county_df, aes(x = date)) + 
+  geom_line(aes(y = monthly_total_pm25, color = "monthly_total_pm25")) +
+  geom_line(aes(y = total_precip, color = "total_precip")) + 
+  geom_line(aes(y = avg_air_temp, color = "avg_air_temp")) + 
+  geom_line(aes(y = avg_dew_point, color = "avg_dew_point")) + 
+  geom_line(aes(y = avg_wind_speed, color = "avg_wind_speed")) + 
+  labs(x = "Year",
+       y = "Value",
+       color = "Legend",title = "Santa Barbara") +
+  scale_color_manual(values = colors) + theme_minimal()
+```
+
+# Analysis of residuals (IMPORTANT)
+
+## Use random component from time series decomposition and compare against residual
+
+### Create new columns for residuals of important variables
+
+```{r}
+test = county_df %>% select(death_rate,monthly_total_pm25,
+                    percent_ili,total_precip,avg_air_temp,
+                    avg_dew_point,avg_wind_speed,AQI,
+                    lead,co,so2,no2,o3,
+                    pm10,nonsmoke_pm25) %>% st_drop_geometry()
+
+test_ts = ts(test,start=1,frequency = 12)
+
+ts_decomposed = lapply(test_ts,decompose)
+
+county_df_resid = data.frame(county_df$date)
+
+for(i in 1:15){
+  # plot(ts_decomposed[[i]])
+  resid_col = ts_decomposed[[i]]$random
+  county_df_resid = cbind(county_df_resid,resid_col)
+}
+
+###Could add linear trend in but prob not good to add otherwise correlations will pick it up
+# for(i in 1:13){
+#   # plot(ts_decomposed[[i]])
+#   resid_col = ts_decomposed[[i]]$random + ts_decomposed[[i]]$trend
+#   county_df_resid = cbind(county_df_resid,resid_col)
+# }
+
+colnames(county_df_resid) = c("date","death_rate","monthly_total_pm25",
+                          "percent_ili","total_precip","avg_air_temp",
+                          "avg_dew_point","avg_wind_speed",
+                          "AQI","lead","co","so2","no2","o3",
+                          "pm10","nonsmoke_pm25")
+
+county_df_resid = na.omit(county_df_resid)
+```
+
+### Check for stationarity
+
+```{r}
+#Mortality (needs transformation)
+plot.ts(county_df_resid$death_rate)
+
+transformed_outcome_ts = sqrt(county_df_resid$death_rate+3)
+plot.ts(transformed_outcome_ts)
+
+#Exposure (needs transformation)
+plot.ts(county_df_resid$monthly_total_pm25)
+
+minval = min(county_df_resid$monthly_total_pm25)
+
+transformed_treatment_ts = sqrt(county_df_resid$monthly_total_pm25-minval)
+plot.ts(transformed_treatment_ts)
+
+#Air pollutants
+plot.ts(county_df_resid$co)
+plot.ts(county_df_resid$no2)
+plot.ts(county_df_resid$so2)
+plot.ts(county_df_resid$o3)
+
+#ILI prevalence (needs transformation)
+plot.ts(county_df_resid$percent_ili)
+
+transformed_ili_prev_ts = sqrt(county_df_resid$percent_ili + 2)
+plot.ts(transformed_ili_prev_ts)
+
+#Weather
+plot.ts(county_df_resid$total_precip)
+plot.ts(county_df_resid$avg_air_temp)
+plot.ts(county_df_resid$avg_dew_point)
+plot.ts(county_df_resid$avg_wind_speed)
+```
+
+
+### ACF/PACFs
+
+```{r}
+# acf(county_df_resid$death_rate)
+# pacf(county_df_resid$death_rate)
+
+acf(transformed_outcome_ts)
+pacf(transformed_outcome_ts)
+```
+
+Resid_death: PACF has significant lags at 3 and 4 (-3ish) why negative? No significant ACF lags
+
+```{r}
+# acf(county_df_resid$monthly_total_pm25)
+# pacf(county_df_resid$monthly_total_pm25)
+
+acf(transformed_treatment_ts)
+pacf(transformed_treatment_ts)
+```
+
+Resid_treatment: ACF has significant lag at 12 (-0.25), PACF has significant lag at 12 (-0.3)
+
+```{r}
+acf(county_df_resid$AQI)
+pacf(county_df_resid$AQI)
+```
+
+Resid_aqi: PACF has significant lags at 12 (-0.27ish) why negative? No significant ACF lags
+
+```{r}
+# acf(county_df_resid$percent_ili)
+# pacf(county_df_resid$percent_ili)
+
+acf(transformed_ili_prev_ts)
+pacf(transformed_ili_prev_ts)
+```
+
+Resid_ili_prevalence: ACF has significant lag at 1,5 (0.3,-0.25), PACF has significant lag at 1,11 (0.33,-0.3)
+
+```{r}
+acf(county_df_resid$total_precip)
+pacf(county_df_resid$total_precip)
+```
+
+Resid_precip: ACF has significant lag at 12 (-0.25), PACF has significant lag at 5 and 12 (-0.27ish)
+
+```{r}
+acf(county_df_resid$avg_air_temp)
+pacf(county_df_resid$avg_air_temp)
+```
+
+Resid_temp: ACF has significant lag at 3 (-0.4), PACF has significant lag at 2,3, and 5 (all -0.3ish)
+
+```{r}
+acf(county_df_resid$avg_dew_point)
+pacf(county_df_resid$avg_dew_point)
+```
+
+Resid_dew: ACF has significant lag at 12 (-0.25), PACF has significant lag at 12 (-0.27)
+
+```{r}
+acf(county_df_resid$avg_wind_speed)
+pacf(county_df_resid$avg_wind_speed)
+```
+
+Resid_wind: ACF has significant lags at 4 and 5 (-0.4) and 18 (0.35), PACF has significant lags as 12 and 14 (-0.3)
+
+```{r}
+acf(county_df_resid$co)
+pacf(county_df_resid$co)
+```
+
+Resid_co: no significant lags 
+
+```{r}
+acf(county_df_resid$no2)
+pacf(county_df_resid$no2)
+```
+
+Resid_no2: no significant lags (maybe 14 for ACF and 1 for PACF)
+
+```{r}
+acf(county_df_resid$so2)
+pacf(county_df_resid$so2)
+```
+
+Resid_so2: significant lags for ACF at 3,4,5 (-0.3) and 9 (0.33) and for PACF 3,5,17
+
+```{r}
+acf(county_df_resid$o3)
+pacf(county_df_resid$o3)
+```
+
+Resid_o3: significant lags for ACF at 4 (-0.4) and for PACF 2,4,14 (-0.29,-0.4,-0.4)
+
+Negative autocorrelations: current values are negative correlated with past values - year to year variation? 
+
+
+### Correlation plots (Cross Correlation, Spearman's, Granger causality):
+
+Significant negative lags in CCF: lags of first TS are correlated with present value of second TS 
+
+Significant positive lags in CCF: lags of second TS are correlated with present value of first TS
+
+Granger causality: is one time series useful in forecasting another time series (temporally related)
+
+```{r}
+save_ccf <- function(x, y, file, lag.max = 36, width = 6, height = 3, res = 600, title){
+  png(file, width = width, height = height, units = "in", res = res)
+  ccf(x, y, lag.max = 36,main = title)
+  dev.off()
+}
+```
+
+
+```{r}
+#mortality rate + wildfire pm25
+ccf(transformed_outcome_ts,transformed_treatment_ts,lag.max = 36,main = "CCFs for Respiratory Related Mortality Rate & Exposure")
+
+save_ccf(
+  x = transformed_outcome_ts,
+  y = transformed_treatment_ts,
+  file = "/home/jovyan/work/important-plots/ccf_outcome_treatment.png",
+  title = "CCFs for Respiratory Related Mortality Rate & Exposure"
+)
+
+cor(transformed_outcome_ts,transformed_treatment_ts,method = "spearman")
+
+lmtest::grangertest(transformed_outcome_ts~transformed_treatment_ts,order = 12)
+```
+
+Mortality rate + treatment
+
+- CCF: Only significant peak is at +1 (0.6) which means that mortality rates one month in the future is positively correlated with wildfire pm2.5 levels now
+- Spearman's: 0.164
+- Granger causality hypothesis test: Almost significant but no
+
+```{r}
+#wildfire pm25 + AQI
+ccf(transformed_treatment_ts,county_df_resid$AQI,lag.max = 36,main = "CCFs for Exposure & AQI")
+
+cor(transformed_treatment_ts,county_df_resid$AQI,method = "spearman")
+
+lmtest::grangertest(county_df_resid$AQI~transformed_treatment_ts,order = 12)
+```
+
+Exposure + AQI
+
+- CCF: Significant peaks at 0,1,35. Positively correlated at 0,35. Negatively correlated at 1 - How do we interpret negative correlation at lag +1? 
+- Spearman's: 0.397
+- Granger causality hypothesis test: significant! 
+
+```{r}
+#wildfire pm25 + CO
+# ccf(county_df_resid$monthly_total_pm25,county_df_resid$co,lag.max = 36)
+# 
+# cor(county_df_resid$monthly_total_pm25,county_df_resid$co,method = "spearman")
+# 
+# lmtest::grangertest(county_df_resid$co~county_df_resid$monthly_total_pm25,order = 12)
+
+#with transformed treatment
+ccf(transformed_treatment_ts,county_df_resid$co,lag.max = 36,main = "CCFs for Exposure & CO")
+
+save_ccf(
+  x = transformed_treatment_ts,
+  y = county_df_resid$co,
+  file = "/home/jovyan/work/important-plots/ccf_treatment_co.png",
+  title = "CCFs for Exposure & CO"
+)
+
+cor(transformed_treatment_ts,county_df_resid$co,method = "spearman")
+
+lmtest::grangertest(county_df_resid$co~transformed_treatment_ts,order = 12)
+```
+
+Exposure + CO 
+
+- CCF: Significant peaks at -11,0,1,35. Positively correlated at -11, 0, and 35. Negatively correlated at 1 - how do we interpret negative correlation at lag 1? 
+- Spearman's: 0.427
+- Granger causality hypothesis test: significant! 
+
+```{r}
+#wildfire pm25 + NO2
+# ccf(county_df_resid$monthly_total_pm25,county_df_resid$no2,lag.max = 36)
+# 
+# cor(county_df_resid$monthly_total_pm25,county_df_resid$no2,method = "spearman")
+# 
+# lmtest::grangertest(county_df_resid$no2~county_df_resid$monthly_total_pm25,order = 12)
+
+#with transformed treatment
+ccf(transformed_treatment_ts,county_df_resid$no2,lag.max = 36,main = "CCFs for Exposure & NO2")
+
+cor(transformed_treatment_ts,county_df_resid$no2,method = "spearman")
+
+lmtest::grangertest(county_df_resid$no2~transformed_treatment_ts,order = 12)
+```
+
+Exposure + NO2
+
+- CCF: Significant peaks at -12,-11,0,1,35. Positively correlated at -11, 0, and 35. Negatively correlated at -12 and +1.  
+- Spearman's: 0.441
+- Granger causality hypothesis test: not significant 
+
+```{r}
+#wildfire pm25 + SO2
+# ccf(county_df_resid$monthly_total_pm25,county_df_resid$so2,lag.max = 36)
+# 
+# cor(county_df_resid$monthly_total_pm25,county_df_resid$so2,method = "spearman")
+# 
+# lmtest::grangertest(county_df_resid$so2~county_df_resid$monthly_total_pm25,order = 12)
+
+#with transformed treatment
+ccf(transformed_treatment_ts,county_df_resid$so2,lag.max = 36,main = "CCFs for Exposure & SO2")
+
+cor(transformed_treatment_ts,county_df_resid$so2,method = "spearman")
+
+lmtest::grangertest(county_df_resid$so2~transformed_treatment_ts,order = 12)
+```
+
+Exposure + SO2
+
+- CCF: Significant peaks at -12,-7,0,21,35. Positively correlated at -7, 0, and 35. Negatively correlated at -12, and 21.  
+- Spearman's: 0.304
+- Granger causality hypothesis test: significant! 
+
+```{r}
+#wildfire pm25 + O3
+# ccf(county_df_resid$monthly_total_pm25,county_df_resid$o3,lag.max = 36)
+# 
+# cor(county_df_resid$monthly_total_pm25,county_df_resid$o3,method = "spearman")
+# 
+# lmtest::grangertest(county_df_resid$o3~county_df_resid$monthly_total_pm25,order = 12)
+
+#with transformed treatment
+ccf(transformed_treatment_ts,county_df_resid$o3,lag.max = 36,main = "CCFs for Exposure & O3")
+
+cor(transformed_treatment_ts,county_df_resid$o3,method = "spearman")
+
+lmtest::grangertest(county_df_resid$o3~transformed_treatment_ts,order = 12)
+```
+
+Exposure + O3
+
+- CCF: Significant peaks at 6,10,11,35. Positively correlated at 10 and 11. Negatively correlated at 6,35.  
+- Spearman's: -0.056
+- Granger causality hypothesis test: significant! 
+
+```{r}
+#mortality rate + AQI
+ccf(transformed_outcome_ts,county_df_resid$AQI,lag.max = 36,main = "CCFs for Respiratory Related Mortality Rate & AQI")
+
+cor(transformed_outcome_ts,county_df_resid$AQI,method = "spearman")
+
+lmtest::grangertest(transformed_outcome_ts~county_df_resid$AQI,order = 12)
+```
+
+Mortality rate + AQI
+
+- CCF: Significant peaks at +12 (-0.3) and 36 (0.3)? Death rate one year in the future is negatively correlated with current AQI? 
+- Spearman's: 0.069
+- Granger causality hypothesis test: significant! 
+
+```{r}
+#wildfire pm25 + ILI prevalence
+
+###with transformed treatment ts
+# ccf(transformed_treatment_ts,county_df_resid$percent_ili,lag.max = 36, main = "CCFs for Exposure & ILI Prevalence")
+# 
+# cor(transformed_treatment_ts,county_df_resid$percent_ili,method = "spearman")
+# 
+# lmtest::grangertest(county_df_resid$percent_ili~transformed_treatment_ts,order = 12)
+
+
+ccf(transformed_treatment_ts,transformed_ili_prev_ts,lag.max = 36, main = "CCFs for Exposure & ILI Prevalence")
+
+save_ccf(
+  x = transformed_treatment_ts,
+  y = transformed_ili_prev_ts,
+  file = "/home/jovyan/work/important-plots/ccf_treatment_ili.png",
+  title = "CCFs for Exposure & ILI Prevalence"
+)
+
+cor(transformed_treatment_ts,transformed_ili_prev_ts,method = "spearman")
+
+lmtest::grangertest(transformed_ili_prev_ts~transformed_treatment_ts,order = 12)
+```
+
+Exposure + ILI prevalence: 
+
+- CCF: Significant peak at -1 (0.45)
+- Spearman's: 0.062
+- Granger causality hypothesis test: not significant 
+
+```{r}
+#wildfire pm25 + precipitation
+ccf(transformed_treatment_ts,county_df_resid$total_precip,lag.max = 36,main = "CCFs for Exposure & Precipitation")
+
+save_ccf(
+  x = transformed_treatment_ts,
+  y = county_df_resid$total_precip,
+  file = "/home/jovyan/work/important-plots/ccf_treatment_precip.png",
+  title = "CCFs for Exposure & Precipitation"
+)
+
+cor(transformed_treatment_ts,county_df_resid$total_precip,method = "spearman")
+
+lmtest::grangertest(transformed_treatment_ts~county_df_resid$total_precip,order = 12)
+```
+
+Exposure + Precipitation
+
+- CCF: Significant peaks at -3,9,11,21,36. Positively correlated at -3,11,36 and negatively correlated at +9,35
+- Spearman's: -0.111
+- Granger causality hypothesis test: not significant
+
+```{r}
+#wildfire pm25 + temp
+ccf(transformed_treatment_ts,county_df_resid$avg_air_temp,lag.max = 36,main = "CCFs for Exposure & Temperature")
+
+cor(transformed_treatment_ts,county_df_resid$avg_air_temp,method = "spearman")
+
+lmtest::grangertest(transformed_treatment_ts~county_df_resid$avg_air_temp,order = 12)
+```
+
+Exposure + Temperature
+
+- CCF: no significant lags
+- Spearman's: 0.141
+- Granger causality hypothesis test: not significant
+
+```{r}
+#wildfire pm25 + humidity
+ccf(transformed_treatment_ts,county_df_resid$avg_dew_point,lag.max = 36,main = "CCFs for Exposure & Humidity")
+
+cor(transformed_treatment_ts,county_df_resid$avg_dew_point,method = "spearman")
+
+lmtest::grangertest(transformed_treatment_ts~county_df_resid$avg_dew_point,order = 12)
+```
+
+Exposure + Humidity
+
+- CCF: Significant peaks at 0,1. Notable negative correlation at lag 0 (-0.45) which makes sense, because higher dew point means more humid. But for lag 1, past values of humidity are positively correlated with current values of treatment 
+- Spearman's: -0.314
+- Granger causality hypothesis test: not significant
+
+```{r}
+#wildfire pm25 + wind
+ccf(transformed_treatment_ts,county_df_resid$avg_wind_speed,lag.max = 36,main = "CCFs for Exposure & Wind")
+
+cor(transformed_treatment_ts,county_df_resid$avg_wind_speed,method = "spearman")
+
+lmtest::grangertest(transformed_treatment_ts~county_df_resid$avg_wind_speed,order = 12)
+```
+
+Exposure + Wind 
+
+- CCF: Significant peaks at -4 and +1. Notable negative correlations at lag +1 (-0.4). Positive correlation at -4 (0.28). Negative correlations make sense bc higher wind speeds would probably lead to smaller treatment value  
+- Spearman's: -0.397
+- Granger causality hypothesis test: not significant
+
+```{r}
+#temperature + wind
+ccf(county_df_resid$avg_air_temp,county_df_resid$avg_wind_speed,lag.max = 36,main = "CCFs for Temperature & Wind")
+
+cor(county_df_resid$avg_air_temp,county_df_resid$avg_wind_speed,method = "spearman")
+
+lmtest::grangertest(county_df_resid$avg_air_temp~county_df_resid$avg_wind_speed,order = 12)
+```
+
+Temperature + Wind
+
+- CCF: Significant peaks at 0,+1,3,4. Lags 0 and 1 have negative correlations (-0.45 and -0.3) and lags 3 and 4 have positive correlations (0.4 and 0.2)
+- Spearman's: -0.432
+- Granger causality hypothesis test: not significant
+
+```{r}
+#humidity + wind
+ccf(county_df_resid$avg_dew_point,county_df_resid$avg_wind_speed,lag.max = 36,main = "CCFs for Humidity & Wind")
+
+cor(county_df_resid$avg_dew_point,county_df_resid$avg_wind_speed,method = "spearman")
+
+lmtest::grangertest(county_df_resid$avg_dew_point~county_df_resid$avg_wind_speed,order = 12)
+```
+
+Humidity + Wind
+
+- CCF: Significant peaks at 0,+2. Lags 0 has a negative correlation of -0.27 and lag 2 has a positive correlation of 0.27
+- Spearman's: -0.202
+- Granger causality hypothesis test: not significant
+
+```{r}
+#precipitation + humidity
+ccf(county_df_resid$total_precip,county_df_resid$avg_dew_point,lag.max = 36,main = "CCFs for Precipitation & Humidity")
+
+cor(county_df_resid$total_precip,county_df_resid$avg_dew_point,method = "spearman")
+
+lmtest::grangertest(county_df_resid$total_precip~county_df_resid$avg_dew_point,order = 12)
+```
+
+Precipitation + Humidity: 
+
+- CCF: Many significant peaks (-35,-2,+3,16,28), lags -35,-2, and +16 are positive correlations, lags 3 and +28 have negative correlations
+- Spearman's: 0.108
+- Granger causality hypothesis test: not significant
+
+```{r}
+#mortality rate + temperature
+ccf(transformed_outcome_ts,county_df_resid$avg_air_temp,lag.max = 36,main = "CCFs for Respiratory Related Mortality Rate & Temperature")
+
+cor(transformed_outcome_ts,county_df_resid$avg_air_temp,method = "spearman")
+
+lmtest::grangertest(transformed_outcome_ts~county_df_resid$avg_air_temp,order = 12)
+```
+
+Mortality rate + Temperature
+
+- CCF: Significant peaks at -2,1,25. Lags -2,25 have negative correlations of about -0.25 and lag 1 has a positive correlation of 0.3
+- Spearman's: 0.210
+- Granger causality hypothesis test: not significant
+
+```{r}
+#mortality rate + humidity
+ccf(transformed_outcome_ts,county_df_resid$avg_dew_point,lag.max = 36,main = "CCFs for Respiratory Related Mortality Rate & Humidity")
+
+cor(transformed_outcome_ts,county_df_resid$avg_dew_point,method = "spearman")
+
+lmtest::grangertest(transformed_outcome_ts~county_df_resid$avg_dew_point,order = 12)
+```
+
+Mortality rate + Humidity
+
+- CCF: Significant peaks at 2,3, and 25. Lags 3,25 have negative correlations of -0.3 and lag 2 has a positive correlation of 0.33
+- Spearman's: 0.121
+- Granger causality hypothesis test: significant!
+
+```{r}
+#mortality rate + precipitation
+ccf(transformed_outcome_ts,county_df_resid$total_precip,lag.max = 36,main = "CCFs for Respiratory Related Mortality Rate & Precipitation")
+
+save_ccf(
+  x = transformed_outcome_ts,
+  y = county_df_resid$total_precip,
+  file = "/home/jovyan/work/important-plots/ccf_outcome_precip.png",
+  title = "CCFs for Respiratory Related Mortality Rate & Precipitation"
+)
+
+cor(transformed_outcome_ts,county_df_resid$total_precip,method = "spearman")
+
+lmtest::grangertest(transformed_outcome_ts~county_df_resid$total_precip,order = 12)
+```
+
+Mortality rate + Precipitation
+
+- CCF: Significant peaks at 11 (0.35)
+- Spearman's: -0.112
+- Granger causality hypothesis test: not significant
+
+```{r}
+#mortality rate + wind
+ccf(transformed_outcome_ts,county_df_resid$avg_wind_speed,lag.max = 36,main = "CCFs for Respiratory Related Mortality Rate & Wind")
+
+cor(transformed_outcome_ts,county_df_resid$avg_wind_speed,method = "spearman")
+
+lmtest::grangertest(transformed_outcome_ts~county_df_resid$avg_wind_speed,order = 12)
+```
+
+Mortality rate + Wind
+
+- CCF: Significant lags -13 and +1,2 have correlations of 0.4, -0.35, and -0.36 respectively
+- Spearman's: -0.172
+- Granger causality hypothesis test: significant!
+
+```{r}
+#mortality rate + co
+ccf(transformed_outcome_ts,county_df_resid$co,lag.max = 36,main = "CCFs for Respiratory Related Mortality Rate & CO")
+
+save_ccf(
+  x = transformed_outcome_ts,
+  y = county_df_resid$co,
+  file = "/home/jovyan/work/important-plots/ccf_outcome_co.png",
+  title = "CCFs for Respiratory Related Mortality Rate & CO"
+)
+
+cor(transformed_outcome_ts,county_df_resid$co,method = "spearman")
+
+lmtest::grangertest(transformed_outcome_ts~county_df_resid$co,order = 12)
+```
+
+Mortality rate + CO
+
+- CCF: Almost significant lags -10,3 have correlations of 0.3
+- Spearman's: basically 0
+- Granger causality hypothesis test: significant!
+
+```{r}
+#mortality rate + ILI prevalence
+ccf(transformed_outcome_ts,transformed_ili_prev_ts,lag.max = 36,main = "CCFs for Respiratory Related Mortality Rate & ILI Prevalence")
+
+save_ccf(
+  x = transformed_outcome_ts,
+  y = transformed_ili_prev_ts,
+  file = "/home/jovyan/work/important-plots/ccf_outcome_ili.png",
+  title = "CCFs for Respiratory Related Mortality Rate & ILI Prevalence"
+)
+
+cor(transformed_outcome_ts,transformed_ili_prev_ts,method = "spearman")
+
+lmtest::grangertest(transformed_outcome_ts~transformed_ili_prev_ts,order = 12)
+```
+
+Mortality rate + ILI prevalence
+
+- CCF: Significant lags -4,-1,0 have correlations of -0.3, -0.31, and 0.4 respectively
+- Spearman's: 0.157
+- Granger causality hypothesis test: Not significant
+
+
+ARE THE RESULTS SIMILAR BETWEEN COUNTIES? OR ARE THERE CLUSTERS 
+
+- seems like results are more or less similar... there are significant autocorrelations most of the time
+- seems like patterns are more geographic based than SKATER (socioeconomic) based 
+
+### Function to calculate CCF for each county and create a heatmap
+
+```{r}
+spatial_ccf_heatmap <- function(var1 = 'death_rate', var2 = 'monthly_total_pm25', lag = 0) {
+  county_ccfs <- data.frame(county = california_geoids$County, ccf = NA)
+  
+  for (i in 1:58) {
+    df = inla_df %>% filter(NAME == california_geoids$County[i]) %>% select(var1, var2) %>%
+      st_drop_geometry() %>% na.omit()
+    
+    ccf_vals = ccf(df[[var1]], df[[var2]], plot = FALSE, lag.max = 36)
+    county_ccfs$ccf[i] = ccf_vals$acf[lag + ccf_vals$lag == 0]
+  }
+  
+  # Merge county_ccfs with county_map for plotting
+  county_ccfs$county = tolower(county_ccfs$county)
+  county_map_ccfs = merge(county_map, county_ccfs, by.x = "subregion", by.y = "county")
+  
+  # Create the heatmap
+  ggplot() + 
+    geom_polygon(data = county_map_ccfs, aes(x = long, y = lat, group = group, fill = ccf), 
+                 color = "black") +
+    coord_fixed(ratio = 1.3, xlim = c(-125, -112), ylim = c(30, 42)) +
+    theme_void() +
+    labs(title = paste("CCF between", var1, "and", var2, "at lag", lag),
+         fill = "CCF") +
+    scale_fill_gradient(low = "yellow", high = "red")
+}
+
+# Example usage
+spatial_ccf_heatmap(var1 = 'death_rate', var2 = 'total_precip', lag = 12)
+```
+
+
